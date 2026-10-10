@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="gradBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A" />
+      <stop offset="100%" stop-color="#1E293B" />
+    </linearGradient>
+    <linearGradient id="gradAccent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F59E0B" />
+      <stop offset="100%" stop-color="#D97706" />
+    </linearGradient>
+    <linearGradient id="gradPaper" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#F1F5F9" />
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded App Icon Background -->
+  <rect width="512" height="512" rx="108" fill="url(#gradBg)" />
+  
+  <!-- Subtle Grid/Blueprint lines in background -->
+  <path d="M 64 128 L 448 128 M 64 256 L 448 256 M 64 384 L 448 384 M 128 64 L 128 448 M 256 64 L 256 448 M 384 64 L 384 448" stroke="#334155" stroke-width="2" stroke-opacity="0.3" />
+
+  <!-- Ledger Sheet / Clipboard Base -->
+  <g transform="translate(106, 86)">
+    <!-- Shadow -->
+    <rect x="6" y="8" width="288" height="340" rx="20" fill="#000000" opacity="0.4" />
+    
+    <!-- White Paper Sheet -->
+    <rect x="0" y="0" width="288" height="340" rx="20" fill="url(#gradPaper)" stroke="#CBD5E1" stroke-width="3" />
+    
+    <!-- Top Header Bar of Sheet (Construction Amber) -->
+    <path d="M 0 20 Q 0 0 20 0 L 268 0 Q 288 0 288 20 L 288 64 L 0 64 Z" fill="url(#gradAccent)" />
+    
+    <!-- Hard Hat Icon / Construction Seal in Header -->
+    <path d="M 124 44 C 124 28 140 22 144 22 C 148 22 164 28 164 44 Z" fill="#FFFFFF" />
+    <path d="M 116 44 L 172 44 L 172 48 L 116 48 Z" fill="#FFFFFF" />
+
+    <!-- Ledger Lines -->
+    <line x1="36" y1="96" x2="252" y2="96" stroke="#94A3B8" stroke-width="5" stroke-linecap="round" />
+    <line x1="36" y1="136" x2="180" y2="136" stroke="#CBD5E1" stroke-width="4" stroke-linecap="round" />
+    <line x1="200" y1="136" x2="252" y2="136" stroke="#F59E0B" stroke-width="4" stroke-linecap="round" />
+
+    <line x1="36" y1="176" x2="190" y2="176" stroke="#CBD5E1" stroke-width="4" stroke-linecap="round" />
+    <line x1="210" y1="176" x2="252" y2="176" stroke="#F59E0B" stroke-width="4" stroke-linecap="round" />
+
+    <line x1="36" y1="216" x2="160" y2="216" stroke="#CBD5E1" stroke-width="4" stroke-linecap="round" />
+    <line x1="180" y1="216" x2="252" y2="216" stroke="#F59E0B" stroke-width="4" stroke-linecap="round" />
+
+    <!-- Total calculation divider -->
+    <line x1="36" y1="260" x2="252" y2="260" stroke="#0F172A" stroke-width="3" stroke-dasharray="4 4" />
+    
+    <!-- Checkmark Badge in Emerald / Teal -->
+    <circle cx="216" cy="296" r="22" fill="#10B981" />
+    <path d="M 207 296 L 213 302 L 226 289" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
+
+    <!-- Currency sign '₦' symbol -->
+    <text x="36" y="306" font-family="system-ui, -apple-system, sans-serif" font-weight="900" font-size="28" fill="#0F172A">₦ myRet</text>
+  </g>
+</svg>

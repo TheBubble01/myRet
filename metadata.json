@@ -1,0 +1,6 @@
+{
+  "name": "myRet - Site Expenditure & Retirement",
+  "description": "Digital construction-site expenditure and retirement management application replacing manual physical retirement books with automated calculations and audit-ready PDF reports.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

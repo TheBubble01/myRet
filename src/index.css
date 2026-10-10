@@ -1,0 +1,160 @@
+@import "tailwindcss";
+
+/* Base color tokens for dark mode (default) */
+:root {
+  --color-slate-950: #020617;
+  --color-slate-900: #0f172a;
+  --color-slate-800: #1e293b;
+  --color-slate-700: #334155;
+  --color-slate-600: #475569;
+  --color-slate-500: #64748b;
+  --color-slate-400: #94a3b8;
+  --color-slate-300: #cbd5e1;
+  --color-slate-200: #e2e8f0;
+  --color-slate-100: #f1f5f9;
+  --color-white: #ffffff;
+  --color-black: #000000;
+
+  /* Semantic badges/alerts for dark mode */
+  --color-red-950: #450a0a;
+  --color-red-800: #991b1b;
+  --color-red-200: #fecaca;
+  --color-emerald-950: #022c22;
+  --color-emerald-800: #065f46;
+  --color-emerald-200: #a7f3d0;
+  --color-amber-950: #451a03;
+  --color-amber-800: #92400e;
+  --color-blue-950: #172554;
+  --color-blue-800: #1e40af;
+  --color-purple-950: #3b0764;
+  --color-purple-800: #6b21a8;
+}
+
+/* Light mode overrides via data-theme attribute or .light class */
+:root[data-theme="light"],
+html.light,
+html[data-theme="light"] {
+  color-scheme: light;
+  --color-slate-950: #f8fafc;
+  --color-slate-900: #ffffff;
+  --color-slate-800: #f1f5f9;
+  --color-slate-700: #e2e8f0;
+  --color-slate-600: #64748b;
+  --color-slate-500: #475569;
+  --color-slate-400: #334155;
+  --color-slate-300: #1e293b;
+  --color-slate-200: #0f172a;
+  --color-slate-100: #020617;
+  --color-white: #090d16;
+  --color-black: #000000;
+
+  /* Semantic badges/alerts for light mode: softer backgrounds with rich text */
+  --color-red-950: #fef2f2;
+  --color-red-800: #fecaca;
+  --color-red-200: #991b1b;
+  --color-emerald-950: #f0fdf4;
+  --color-emerald-800: #bbf7d0;
+  --color-emerald-200: #166534;
+  --color-amber-950: #fffbeb;
+  --color-amber-800: #fde68a;
+  --color-blue-950: #eff6ff;
+  --color-blue-800: #bfdbfe;
+  --color-purple-950: #faf5ff;
+  --color-purple-800: #e9d5ff;
+}
+
+/* Automatic system media query fallback (if script hasn't run yet) */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not(.dark),
+  html:not([data-theme="dark"]):not(.dark) {
+    color-scheme: light;
+    --color-slate-950: #f8fafc;
+    --color-slate-900: #ffffff;
+    --color-slate-800: #f1f5f9;
+    --color-slate-700: #e2e8f0;
+    --color-slate-600: #64748b;
+    --color-slate-500: #475569;
+    --color-slate-400: #334155;
+    --color-slate-300: #1e293b;
+    --color-slate-200: #0f172a;
+    --color-slate-100: #020617;
+    --color-white: #090d16;
+    --color-black: #000000;
+
+    --color-red-950: #fef2f2;
+    --color-red-800: #fecaca;
+    --color-red-200: #991b1b;
+    --color-emerald-950: #f0fdf4;
+    --color-emerald-800: #bbf7d0;
+    --color-emerald-200: #166534;
+    --color-amber-950: #fffbeb;
+    --color-amber-800: #fde68a;
+    --color-blue-950: #eff6ff;
+    --color-blue-800: #bfdbfe;
+    --color-purple-950: #faf5ff;
+    --color-purple-800: #e9d5ff;
+  }
+}
+
+:root[data-theme="dark"],
+html.dark,
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --color-slate-950: #020617;
+  --color-slate-900: #0f172a;
+  --color-slate-800: #1e293b;
+  --color-slate-700: #334155;
+  --color-slate-600: #475569;
+  --color-slate-500: #64748b;
+  --color-slate-400: #94a3b8;
+  --color-slate-300: #cbd5e1;
+  --color-slate-200: #e2e8f0;
+  --color-slate-100: #f1f5f9;
+  --color-white: #ffffff;
+  --color-black: #000000;
+
+  --color-red-950: #450a0a;
+  --color-red-800: #991b1b;
+  --color-red-200: #fecaca;
+  --color-emerald-950: #022c22;
+  --color-emerald-800: #065f46;
+  --color-emerald-200: #a7f3d0;
+  --color-amber-950: #451a03;
+  --color-amber-800: #92400e;
+  --color-blue-950: #172554;
+  --color-blue-800: #1e40af;
+  --color-purple-950: #3b0764;
+  --color-purple-800: #6b21a8;
+}
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Custom scrollbars for data entry panels */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--color-slate-900);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-slate-700);
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-slate-600);
+  }
+}
+
+@media print {
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+}
