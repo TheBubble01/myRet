@@ -1,4 +1,5 @@
 import express, { Request, Response, NextFunction } from 'express';
+import http from 'http';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
@@ -7,6 +8,11 @@ import { createClient, User } from '@supabase/supabase-js';
 
 // Load environment variables from .env
 dotenv.config();
+
+// Ensure HMR is disabled in AI Studio environment to prevent WebSocket closed errors
+if (process.env.DISABLE_HMR === undefined) {
+  process.env.DISABLE_HMR = 'true';
+}
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -298,9 +304,19 @@ app.post('/api/admin/reset-password', requireAuth, requireAdmin, async (req: Req
 // VITE SPA INTEGRATION (Express + Vite Middleware)
 // ============================================================================
 async function startServer() {
+  const httpServer = http.createServer(app);
+
   if (!isProd) {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: {
+          server: httpServer,
+        },
+        hmr: {
+          server: httpServer,
+        },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -313,7 +329,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`myRet Full-Stack Server running at http://localhost:${PORT}`);
   });
 }
