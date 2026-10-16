@@ -92,3 +92,35 @@ export interface RetirementTotals {
 }
 
 export type ActiveUtility = 'retirement' | 'project_report' | 'other_utilities' | 'user_management';
+
+export type SyncOperationType =
+  | 'UPSERT_RETIREMENT'
+  | 'DELETE_RETIREMENT'
+  | 'UPSERT_DAILY_RECORD'
+  | 'DELETE_DAILY_RECORD'
+  | 'UPSERT_SUPPLEMENTARY'
+  | 'DELETE_SUPPLEMENTARY'
+  | 'CONNECT_RETIREMENTS'
+  | 'DISCONNECT_RETIREMENTS'
+  | 'CLAIM_RETIREMENT'
+  | 'UPDATE_PROFILE';
+
+export interface SyncQueueItem {
+  id: string; // Operation UUID
+  type: SyncOperationType;
+  entityId: string;
+  retirementId?: string;
+  payload: any;
+  createdAt: string;
+  retryCount: number;
+  lastError?: string;
+  status: 'pending' | 'syncing' | 'failed';
+}
+
+export interface SyncState {
+  status: 'idle' | 'syncing' | 'synced' | 'pending' | 'offline' | 'error' | 'tables_missing';
+  pendingCount: number;
+  lastSyncedAt: string | null;
+  lastError: string | null;
+  tablesReady: boolean;
+}

@@ -51,7 +51,7 @@ export const SupplementaryModal: React.FC<SupplementaryModalProps> = ({
       description: description.trim(),
       amount: parsedAmount,
       createdAt: new Date().toISOString(),
-      syncStatus: 'synced',
+      syncStatus: 'pending',
     };
 
     onSaveEntry(entry);

@@ -314,7 +314,7 @@ export const DailyRecordModal: React.FC<DailyRecordModalProps> = ({
       dailyTotal: finalDailyTotal,
       createdAt: recordToEdit?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      syncStatus: 'synced',
+      syncStatus: 'pending',
     };
 
     onSave(record);

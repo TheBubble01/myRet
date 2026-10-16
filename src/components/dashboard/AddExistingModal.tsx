@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { X, Search, KeyRound, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { X, Search, KeyRound, AlertCircle, CheckCircle2, RefreshCw } from 'lucide-react';
 import { Retirement, UserProfile } from '../../types';
 import { storage } from '../../utils/storage';
+import { syncService } from '../../utils/syncService';
 
 interface AddExistingModalProps {
   isOpen: boolean;
@@ -17,12 +18,13 @@ export const AddExistingModal: React.FC<AddExistingModalProps> = ({
   onAdded,
 }) => {
   const [code, setCode] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setSuccess(null);
@@ -33,52 +35,83 @@ export const AddExistingModal: React.FC<AddExistingModalProps> = ({
       return;
     }
 
-    const retirement = storage.getRetirementByCode(cleanCode);
-    if (!retirement) {
-      setError(`No retirement found with code "${cleanCode}". Please verify the code with the site owner.`);
-      return;
-    }
+    setIsLoading(true);
 
-    if (retirement.status === 'in_trash') {
-      setError('This retirement is currently in the Trash and cannot be accessed.');
-      return;
-    }
+    try {
+      // 1. Check local storage first
+      let retirement = storage.getRetirementByCode(cleanCode);
 
-    // Check if user already has access
-    const isOwner = retirement.ownerId === currentUser.id;
-    const hasAccess = retirement.access.some(
-      (a) => a.userId === currentUser.id || a.userEmail.toLowerCase() === currentUser.email.toLowerCase()
-    );
+      // 2. If not found locally, look up in cloud Supabase
+      if (!retirement) {
+        try {
+          const claimed = await syncService.claimRetirementByCode(cleanCode);
+          if (claimed) {
+            retirement = claimed;
+          }
+        } catch (cloudErr: any) {
+          console.warn('[AddExistingModal] Cloud claim error:', cloudErr);
+          // If cloud threw an explicit user-facing message, use it
+          if (cloudErr?.message && !cloudErr.message.includes('schema cache')) {
+            setError(cloudErr.message);
+            setIsLoading(false);
+            return;
+          }
+        }
+      }
 
-    if (isOwner || hasAccess) {
-      setSuccess('Retirement linked successfully!');
+      if (!retirement) {
+        setError(`No retirement found with code "${cleanCode}". Please verify the code with the site owner.`);
+        setIsLoading(false);
+        return;
+      }
+
+      if (retirement.status === 'in_trash') {
+        setError('This retirement is currently in the Trash and cannot be accessed.');
+        setIsLoading(false);
+        return;
+      }
+
+      // Check if user already has access
+      const isOwner = retirement.ownerId === currentUser.id;
+      const hasAccess = retirement.access.some(
+        (a) => a.userId === currentUser.id || a.userEmail.toLowerCase() === currentUser.email.toLowerCase()
+      );
+
+      if (isOwner || hasAccess) {
+        setSuccess('Retirement linked successfully!');
+        setIsLoading(false);
+        setTimeout(() => {
+          onAdded(retirement!);
+          onClose();
+        }, 500);
+        return;
+      }
+
+      // Grant Reviewer access for matching shared code
+      retirement.access.push({
+        userId: currentUser.id,
+        userEmail: currentUser.email,
+        userName: currentUser.name,
+        role: 'REVIEWER',
+        grantedAt: new Date().toISOString(),
+      });
+      storage.saveRetirement(retirement);
+      storage.logActivity(
+        retirement.id,
+        'Access Granted via Code',
+        `${currentUser.name} added retirement ${retirement.code} as Reviewer`
+      );
+
+      setSuccess(`Successfully linked to ${retirement.title} as Reviewer!`);
+      setIsLoading(false);
       setTimeout(() => {
-        onAdded(retirement);
+        onAdded(retirement!);
         onClose();
-      }, 500);
-      return;
+      }, 600);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to claim retirement. Please try again.');
+      setIsLoading(false);
     }
-
-    // Grant Reviewer access for matching shared code in MVP
-    retirement.access.push({
-      userId: currentUser.id,
-      userEmail: currentUser.email,
-      userName: currentUser.name,
-      role: 'REVIEWER',
-      grantedAt: new Date().toISOString(),
-    });
-    storage.saveRetirement(retirement);
-    storage.logActivity(
-      retirement.id,
-      'Access Granted via Code',
-      `${currentUser.name} added retirement ${retirement.code} as Reviewer`
-    );
-
-    setSuccess(`Successfully linked to ${retirement.title} as Reviewer!`);
-    setTimeout(() => {
-      onAdded(retirement);
-      onClose();
-    }, 600);
   };
 
   return (
@@ -144,10 +177,20 @@ export const AddExistingModal: React.FC<AddExistingModalProps> = ({
             </button>
             <button
               type="submit"
-              className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-md shadow-amber-500/10 active:scale-95 transition"
+              disabled={isLoading}
+              className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-md shadow-amber-500/10 active:scale-95 transition"
             >
-              <Search className="w-4 h-4" />
-              <span>Find &amp; Add</span>
+              {isLoading ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>Searching...</span>
+                </>
+              ) : (
+                <>
+                  <Search className="w-4 h-4" />
+                  <span>Find &amp; Add</span>
+                </>
+              )}
             </button>
           </div>
         </form>

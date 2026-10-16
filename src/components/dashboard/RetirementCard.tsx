@@ -12,6 +12,9 @@ import {
   ShieldCheck,
   Eye,
   Edit3,
+  Cloud,
+  Clock,
+  Check,
 } from 'lucide-react';
 import { Retirement, UserProfile } from '../../types';
 import { storage } from '../../utils/storage';
@@ -64,9 +67,19 @@ export const RetirementCard: React.FC<RetirementCardProps> = ({
             >
               {role === 'OWNER' ? 'Owner' : 'Reviewer'}
             </span>
-            {retirement.isDemo && (
+            {retirement.isDemo ? (
               <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-950/80 text-blue-300 border border-blue-800/60">
                 Demo Sample
+              </span>
+            ) : retirement.syncStatus === 'pending' ? (
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-800/60 flex items-center gap-1" title="Stored locally — pending cloud backup">
+                <Clock className="w-2.5 h-2.5 text-amber-400" />
+                <span>Pending</span>
+              </span>
+            ) : (
+              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-400 border border-emerald-800/50 flex items-center gap-1" title="Synchronized with cloud database">
+                <Check className="w-2.5 h-2.5 text-emerald-400" />
+                <span>Cloud</span>
               </span>
             )}
             {retirement.connectedRetirementIds && retirement.connectedRetirementIds.length > 0 && (

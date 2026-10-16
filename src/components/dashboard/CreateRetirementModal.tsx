@@ -93,7 +93,7 @@ export const CreateRetirementModal: React.FC<CreateRetirementModalProps> = ({
         },
       ],
       connectedRetirementIds: [],
-      syncStatus: 'synced',
+      syncStatus: 'pending',
     };
 
     storage.saveRetirement(newRetirement);

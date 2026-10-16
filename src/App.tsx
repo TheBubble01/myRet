@@ -14,6 +14,7 @@ import { Session } from '@supabase/supabase-js';
 import { Retirement, UserProfile, ActiveUtility } from './types';
 import { supabase, formatSupabaseUser, isUserAdmin } from './utils/supabaseClient';
 import { storage } from './utils/storage';
+import { syncService } from './utils/syncService';
 import { DashboardHeader } from './components/dashboard/DashboardHeader';
 import { UtilitiesNav } from './components/dashboard/UtilitiesNav';
 import { RetirementCard } from './components/dashboard/RetirementCard';
@@ -69,6 +70,14 @@ export default function App() {
     setRetirements(storage.getRetirements());
   }, []);
 
+  // Subscribe to syncService updates for live UI refresh
+  useEffect(() => {
+    const unsubscribe = syncService.subscribe(() => {
+      refreshRetirements();
+    });
+    return unsubscribe;
+  }, [refreshRetirements]);
+
   // Initialize and subscribe to Supabase Auth state changes
   useEffect(() => {
     let mounted = true;
@@ -85,6 +94,12 @@ export default function App() {
         setCurrentUser(profile);
         storage.setCurrentUser(profile);
         setView('dashboard');
+
+        // Pull cloud data and process pending queue in background
+        syncService.pullFromCloud().then(() => {
+          if (mounted) refreshRetirements();
+          syncService.processQueue();
+        });
       } else {
         setSession(null);
         setCurrentUser(null);
@@ -105,6 +120,12 @@ export default function App() {
         setCurrentUser(profile);
         storage.setCurrentUser(profile);
         setView((prev) => (prev === 'landing' ? 'dashboard' : prev));
+
+        // Pull cloud data on sign-in
+        syncService.pullFromCloud().then(() => {
+          if (mounted) refreshRetirements();
+          syncService.processQueue();
+        });
       } else {
         setSession(null);
         setCurrentUser(null);
@@ -119,7 +140,7 @@ export default function App() {
       mounted = false;
       subscription.unsubscribe();
     };
-  }, []);
+  }, [refreshRetirements]);
 
   // Update retirements whenever current user or view changes
   useEffect(() => {

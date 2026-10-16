@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { Retirement } from '../../types';
 import { storage } from '../../utils/storage';
+import { syncService } from '../../utils/syncService';
 import { formatNaira } from '../../utils/currency';
 
 interface ConnectRetirementModalProps {
@@ -65,6 +66,12 @@ export const ConnectRetirementModal: React.FC<ConnectRetirementModalProps> = ({
     storage.saveRetirement(updatedSource);
     storage.saveRetirement(updatedTarget);
 
+    syncService.enqueue(
+      'CONNECT_RETIREMENTS',
+      `${updatedSource.id}_${updatedTarget.id}`,
+      { retirementA: updatedSource.id, retirementB: updatedTarget.id }
+    );
+
     storage.logActivity(
       retirement.id,
       'Retirement Connected',
@@ -115,6 +122,12 @@ export const ConnectRetirementModal: React.FC<ConnectRetirementModalProps> = ({
     }
 
     storage.saveRetirement(updatedSource);
+    syncService.enqueue(
+      'DISCONNECT_RETIREMENTS',
+      `${retirement.id}_${targetId}`,
+      { retirementA: retirement.id, retirementB: targetId }
+    );
+
     storage.logActivity(
       retirement.id,
       'Retirement Disconnected',

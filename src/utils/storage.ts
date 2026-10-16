@@ -5,10 +5,17 @@ import {
   ActivityLog,
   UserProfile,
   RetirementTotals,
+  SyncOperationType,
 } from '../types';
 import { DEMO_USER, createDemoRetirement, createConnectedDemoRetirement } from './demoData';
 import { generateUUID } from './codeGenerator';
 import { calculateAmount } from './currency';
+
+type SyncTrigger = (type: SyncOperationType, entityId: string, payload: any, retirementId?: string) => void;
+let globalSyncTrigger: SyncTrigger | null = null;
+export function setSyncTrigger(fn: SyncTrigger) {
+  globalSyncTrigger = fn;
+}
 
 /**
  * Normalizes any date string or Date representation to canonical YYYY-MM-DD.
@@ -203,45 +210,69 @@ class StorageService {
     return all.find((r) => r.code.toUpperCase() === cleanCode);
   }
 
-  saveRetirement(retirement: Retirement): void {
+  saveRetirement(retirement: Retirement, skipSync: boolean = false): void {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const index = all.findIndex((r) => r.id === retirement.id);
+    
+    if (!retirement.isDemo && !skipSync) {
+      retirement.syncStatus = 'pending';
+    }
+
     if (index >= 0) {
       all[index] = { ...retirement, updatedAt: new Date().toISOString() };
     } else {
       all.unshift(retirement);
     }
     this.setItem(STORAGE_KEYS.RETIREMENTS, all);
+
+    if (!skipSync && !retirement.isDemo && globalSyncTrigger) {
+      globalSyncTrigger('UPSERT_RETIREMENT', retirement.id, retirement);
+    }
   }
 
-  moveToTrash(id: string): boolean {
+  moveToTrash(id: string, skipSync: boolean = false): boolean {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const index = all.findIndex((r) => r.id === id);
     if (index >= 0) {
       all[index].status = 'in_trash';
       all[index].deletedAt = new Date().toISOString();
+      if (!all[index].isDemo && !skipSync) {
+        all[index].syncStatus = 'pending';
+      }
       this.setItem(STORAGE_KEYS.RETIREMENTS, all);
       this.logActivity(id, 'Moved to Trash', 'Retirement moved to trash (48-hour recovery window)');
+
+      if (!skipSync && !all[index].isDemo && globalSyncTrigger) {
+        globalSyncTrigger('UPSERT_RETIREMENT', id, all[index]);
+      }
       return true;
     }
     return false;
   }
 
-  restoreFromTrash(id: string): boolean {
+  restoreFromTrash(id: string, skipSync: boolean = false): boolean {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const index = all.findIndex((r) => r.id === id);
     if (index >= 0) {
       all[index].status = 'active';
       delete all[index].deletedAt;
+      if (!all[index].isDemo && !skipSync) {
+        all[index].syncStatus = 'pending';
+      }
       this.setItem(STORAGE_KEYS.RETIREMENTS, all);
       this.logActivity(id, 'Restored from Trash', 'Retirement restored back to active state');
+
+      if (!skipSync && !all[index].isDemo && globalSyncTrigger) {
+        globalSyncTrigger('UPSERT_RETIREMENT', id, all[index]);
+      }
       return true;
     }
     return false;
   }
 
-  permanentlyDelete(id: string): boolean {
+  permanentlyDelete(id: string, skipSync: boolean = false): boolean {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
+    const target = all.find((r) => r.id === id);
     const filtered = all.filter((r) => r.id !== id);
     this.setItem(STORAGE_KEYS.RETIREMENTS, filtered);
 
@@ -263,6 +294,10 @@ class StorageService {
       STORAGE_KEYS.ACTIVITY_LOGS,
       logs.filter((l) => l.retirementId !== id)
     );
+
+    if (!skipSync && target && !target.isDemo && globalSyncTrigger) {
+      globalSyncTrigger('DELETE_RETIREMENT', id, { id });
+    }
 
     return true;
   }
@@ -407,10 +442,13 @@ class StorageService {
     return result;
   }
 
-  saveDailyRecord(record: DailyRecord): void {
+  saveDailyRecord(record: DailyRecord, skipSync: boolean = false): void {
     const rawRecords = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
     const normalizedDate = normalizeDate(record.date);
     record.date = normalizedDate;
+    if (!skipSync) {
+      record.syncStatus = 'pending';
+    }
 
     // Recalculate category subtotals and daily total
     record.categories.forEach((cat) => {
@@ -433,10 +471,16 @@ class StorageService {
         r.id !== record.id
     );
 
+    let savedRecord = record;
+
     if (sameDateIndex >= 0) {
       // An entry for this date already exists! Combine into that single Daily Retirement
       const targetRecord = rawRecords[sameDateIndex];
       this.mergeRecordCategories(targetRecord, record);
+      if (!skipSync) {
+        targetRecord.syncStatus = 'pending';
+      }
+      savedRecord = targetRecord;
 
       // If the incoming record was already in rawRecords with a different ID/date, remove it
       if (existingByIdIndex >= 0 && existingByIdIndex !== sameDateIndex) {
@@ -456,18 +500,26 @@ class StorageService {
     // Update retirement updatedAt
     const retirement = this.getRetirementById(record.retirementId);
     if (retirement) {
-      this.saveRetirement(retirement);
+      this.saveRetirement(retirement, skipSync);
+    }
+
+    if (!skipSync && globalSyncTrigger) {
+      globalSyncTrigger('UPSERT_DAILY_RECORD', savedRecord.id, savedRecord, savedRecord.retirementId);
     }
   }
 
-  deleteDailyRecord(id: string, retirementId: string): void {
+  deleteDailyRecord(id: string, retirementId: string, skipSync: boolean = false): void {
     const records = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
     const filtered = records.filter((r) => r.id !== id);
     this.setItem(STORAGE_KEYS.DAILY_RECORDS, filtered);
 
     const retirement = this.getRetirementById(retirementId);
     if (retirement) {
-      this.saveRetirement(retirement);
+      this.saveRetirement(retirement, skipSync);
+    }
+
+    if (!skipSync && globalSyncTrigger) {
+      globalSyncTrigger('DELETE_DAILY_RECORD', id, { id, retirementId }, retirementId);
     }
   }
 
@@ -479,8 +531,11 @@ class StorageService {
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   }
 
-  saveSupplementaryEntry(entry: SupplementaryEntry): void {
+  saveSupplementaryEntry(entry: SupplementaryEntry, skipSync: boolean = false): void {
     const entries = this.getItem<SupplementaryEntry[]>(STORAGE_KEYS.SUPPLEMENTARY, []);
+    if (!skipSync) {
+      entry.syncStatus = 'pending';
+    }
     const index = entries.findIndex((e) => e.id === entry.id);
     if (index >= 0) {
       entries[index] = entry;
@@ -491,18 +546,26 @@ class StorageService {
 
     const retirement = this.getRetirementById(entry.retirementId);
     if (retirement) {
-      this.saveRetirement(retirement);
+      this.saveRetirement(retirement, skipSync);
+    }
+
+    if (!skipSync && globalSyncTrigger) {
+      globalSyncTrigger('UPSERT_SUPPLEMENTARY', entry.id, entry, entry.retirementId);
     }
   }
 
-  deleteSupplementaryEntry(id: string, retirementId: string): void {
+  deleteSupplementaryEntry(id: string, retirementId: string, skipSync: boolean = false): void {
     const entries = this.getItem<SupplementaryEntry[]>(STORAGE_KEYS.SUPPLEMENTARY, []);
     const filtered = entries.filter((e) => e.id !== id);
     this.setItem(STORAGE_KEYS.SUPPLEMENTARY, filtered);
 
     const retirement = this.getRetirementById(retirementId);
     if (retirement) {
-      this.saveRetirement(retirement);
+      this.saveRetirement(retirement, skipSync);
+    }
+
+    if (!skipSync && globalSyncTrigger) {
+      globalSyncTrigger('DELETE_SUPPLEMENTARY', id, { id, retirementId }, retirementId);
     }
   }
 
@@ -669,6 +732,124 @@ class StorageService {
   hasDemoData(): boolean {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     return all.some((r) => r.isDemo);
+  }
+
+  // --- Cloud Sync State & Data Merging ---
+  markRetirementSynced(id: string): void {
+    const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
+    const index = all.findIndex((r) => r.id === id);
+    if (index >= 0) {
+      all[index].syncStatus = 'synced';
+      this.setItem(STORAGE_KEYS.RETIREMENTS, all);
+    }
+  }
+
+  markDailyRecordSynced(id: string): void {
+    const records = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
+    const index = records.findIndex((r) => r.id === id);
+    if (index >= 0) {
+      records[index].syncStatus = 'synced';
+      this.setItem(STORAGE_KEYS.DAILY_RECORDS, records);
+    }
+  }
+
+  markSupplementarySynced(id: string): void {
+    const entries = this.getItem<SupplementaryEntry[]>(STORAGE_KEYS.SUPPLEMENTARY, []);
+    const index = entries.findIndex((e) => e.id === id);
+    if (index >= 0) {
+      entries[index].syncStatus = 'synced';
+      this.setItem(STORAGE_KEYS.SUPPLEMENTARY, entries);
+    }
+  }
+
+  mergeCloudData(
+    cloudRetirements: Retirement[],
+    cloudDailyRecords: DailyRecord[],
+    cloudSupplementary: SupplementaryEntry[]
+  ): void {
+    // 1. Merge Retirements
+    const localRetirements = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
+    const demoRetirements = localRetirements.filter((r) => r.isDemo);
+    const nonDemoLocal = localRetirements.filter((r) => !r.isDemo);
+
+    const mergedRetirements: Retirement[] = [...demoRetirements];
+
+    // Build map of non-demo local
+    const localMap = new Map<string, Retirement>(nonDemoLocal.map((r) => [r.id, r]));
+
+    for (const cloudRet of cloudRetirements) {
+      const existingLocal = localMap.get(cloudRet.id);
+      if (existingLocal) {
+        // If locally modified & pending sync, preserve local changes!
+        if (existingLocal.syncStatus === 'pending') {
+          mergedRetirements.push(existingLocal);
+        } else {
+          // Cloud takes precedence if newer or synced
+          mergedRetirements.push(cloudRet);
+        }
+        localMap.delete(cloudRet.id);
+      } else {
+        // Brand new cloud retirement
+        mergedRetirements.push(cloudRet);
+      }
+    }
+
+    // Keep any remaining local retirements (e.g. created offline)
+    localMap.forEach((local) => {
+      mergedRetirements.push(local);
+    });
+
+    this.setItem(STORAGE_KEYS.RETIREMENTS, mergedRetirements);
+
+    // 2. Merge Daily Records
+    const localRecords = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
+    const mergedRecords: DailyRecord[] = [];
+    const localRecMap = new Map<string, DailyRecord>(localRecords.map((r) => [r.id, r]));
+
+    for (const cloudRec of cloudDailyRecords) {
+      const existing = localRecMap.get(cloudRec.id);
+      if (existing) {
+        if (existing.syncStatus === 'pending') {
+          mergedRecords.push(existing);
+        } else {
+          mergedRecords.push(cloudRec);
+        }
+        localRecMap.delete(cloudRec.id);
+      } else {
+        mergedRecords.push(cloudRec);
+      }
+    }
+
+    localRecMap.forEach((local) => {
+      mergedRecords.push(local);
+    });
+
+    this.setItem(STORAGE_KEYS.DAILY_RECORDS, mergedRecords);
+
+    // 3. Merge Supplementary Entries
+    const localSupp = this.getItem<SupplementaryEntry[]>(STORAGE_KEYS.SUPPLEMENTARY, []);
+    const mergedSupp: SupplementaryEntry[] = [];
+    const localSuppMap = new Map<string, SupplementaryEntry>(localSupp.map((s) => [s.id, s]));
+
+    for (const cloudS of cloudSupplementary) {
+      const existing = localSuppMap.get(cloudS.id);
+      if (existing) {
+        if (existing.syncStatus === 'pending') {
+          mergedSupp.push(existing);
+        } else {
+          mergedSupp.push(cloudS);
+        }
+        localSuppMap.delete(cloudS.id);
+      } else {
+        mergedSupp.push(cloudS);
+      }
+    }
+
+    localSuppMap.forEach((local) => {
+      mergedSupp.push(local);
+    });
+
+    this.setItem(STORAGE_KEYS.SUPPLEMENTARY, mergedSupp);
   }
 }
 
