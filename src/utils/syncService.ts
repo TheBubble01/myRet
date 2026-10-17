@@ -124,6 +124,9 @@ class SyncService {
 
     // Purge superseded pending upserts when an entity or parent retirement is deleted
     if (type === 'DELETE_RETIREMENT') {
+      const existingDeleteItem = this.queue.find(
+        (item) => item.type === 'DELETE_RETIREMENT' && item.entityId === entityId
+      );
       const localRet = storage.getRetirementById(entityId);
       const queuedHasSynced = this.queue.some(
         (item) =>
@@ -133,15 +136,22 @@ class SyncService {
               item.payload &&
               storage.hasRetirementEverSynced(item.payload)))
       );
-      const hasSyncedToCloud =
+      const hasPositiveSyncEvidence =
         payload?.hasSyncedToCloud === true ||
+        existingDeleteItem?.payload?.hasSyncedToCloud === true ||
         queuedHasSynced ||
-        (localRet
-          ? storage.hasRetirementEverSynced(localRet)
-          : payload?.hasSyncedToCloud === false
-            ? false
-            : true);
+        (localRet ? storage.hasRetirementEverSynced(localRet) : false);
+
+      const hasSyncedToCloud = hasPositiveSyncEvidence
+        ? true
+        : existingDeleteItem?.payload?.hasSyncedToCloud === false ||
+            payload?.hasSyncedToCloud === false ||
+            Boolean(localRet)
+          ? false
+          : true;
+
       payload = {
+        ...(existingDeleteItem?.payload || {}),
         ...payload,
         hasSyncedToCloud,
       };
@@ -165,12 +175,24 @@ class SyncService {
     );
 
     if (existingIndex >= 0) {
-      this.queue[existingIndex] = {
-        ...this.queue[existingIndex],
-        payload,
+      const existingItem = this.queue[existingIndex];
+      const mergedPayload =
+        type === 'DELETE_RETIREMENT'
+          ? {
+              ...(existingItem.payload || {}),
+              ...payload,
+              hasSyncedToCloud: payload.hasSyncedToCloud,
+            }
+          : payload;
+      const updatedItem: SyncQueueItem = {
+        ...existingItem,
+        payload: mergedPayload,
         status: 'pending',
+        retryCount: 0,
         createdAt: new Date().toISOString(),
       };
+      delete updatedItem.lastError;
+      this.queue[existingIndex] = updatedItem;
     } else {
       const item: SyncQueueItem = {
         id: generateUUID(),
@@ -228,20 +250,30 @@ class SyncService {
     );
   }
 
-  private async isRetirementTombstonedInCloud(retirementId: string): Promise<boolean> {
+  private async isRetirementTombstonedInCloud(
+    retirementId: string,
+    throwOnError: boolean = false
+  ): Promise<boolean> {
     try {
       const { data, error } = await supabase
         .from('deleted_retirements')
         .select('retirement_id')
         .eq('retirement_id', retirementId)
         .maybeSingle();
-      if (!error && data?.retirement_id) {
-        return true;
+      if (error) {
+        if (throwOnError) {
+          throw error;
+        }
+        return false;
       }
-    } catch {
+      return Boolean(data?.retirement_id);
+    } catch (err) {
+      if (throwOnError) {
+        throw err;
+      }
       // Ignore if deleted_retirements table is not yet deployed
+      return false;
     }
-    return false;
   }
 
   private async checkAndPurgeIfParentRetirementDeleted(retirementId: string): Promise<boolean> {
@@ -535,7 +567,7 @@ class SyncService {
 
         const deletedCount = Array.isArray(deletedRows) ? deletedRows.length : 0;
         if (deletedCount === 0 && hasEverSynced) {
-          const isTombstoned = await this.isRetirementTombstonedInCloud(id);
+          const isTombstoned = await this.isRetirementTombstonedInCloud(id, true);
           if (!isTombstoned) {
             throw new Error(
               `Permanent deletion of retirement ${id} could not be confirmed in cloud (0 rows deleted and no deletion tombstone found).`
