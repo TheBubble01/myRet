@@ -305,17 +305,43 @@ class StorageService {
   private cleanupExpiredTrash(): void {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const now = Date.now();
+    const expired: Retirement[] = [];
     const surviving = all.filter((r) => {
       if (r.status === 'in_trash' && r.deletedAt) {
         const deletedTime = new Date(r.deletedAt).getTime();
         if (now - deletedTime > TRASH_RETENTION_MS) {
+          expired.push(r);
           return false; // Prune expired item
         }
       }
       return true;
     });
+
     if (surviving.length !== all.length) {
       this.setItem(STORAGE_KEYS.RETIREMENTS, surviving);
+
+      // Clean up child daily records and supplementary for expired items
+      const expiredIds = new Set(expired.map((e) => e.id));
+      const records = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
+      this.setItem(
+        STORAGE_KEYS.DAILY_RECORDS,
+        records.filter((r) => !expiredIds.has(r.retirementId))
+      );
+
+      const supp = this.getItem<SupplementaryEntry[]>(STORAGE_KEYS.SUPPLEMENTARY, []);
+      this.setItem(
+        STORAGE_KEYS.SUPPLEMENTARY,
+        supp.filter((s) => !expiredIds.has(s.retirementId))
+      );
+
+      // Trigger cloud deletion for expired non-demo retirements so they are not stranded
+      if (globalSyncTrigger) {
+        for (const item of expired) {
+          if (!item.isDemo) {
+            globalSyncTrigger('DELETE_RETIREMENT', item.id, { id: item.id });
+          }
+        }
+      }
     }
   }
 
@@ -801,28 +827,45 @@ class StorageService {
 
     this.setItem(STORAGE_KEYS.RETIREMENTS, mergedRetirements);
 
-    // 2. Merge Daily Records
+    // 2. Merge Daily Records (Enforcing 1 record per retirement per calendar date)
     const localRecords = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
     const mergedRecords: DailyRecord[] = [];
-    const localRecMap = new Map<string, DailyRecord>(localRecords.map((r) => [r.id, r]));
+    
+    // Index local records by ID and by canonical key: `${retirementId}::${normalizeDate(date)}`
+    const localRecById = new Map<string, DailyRecord>();
+    const localRecByKey = new Map<string, DailyRecord>();
+    for (const r of localRecords) {
+      localRecById.set(r.id, r);
+      localRecByKey.set(`${r.retirementId}::${normalizeDate(r.date)}`, r);
+    }
+
+    const processedLocalIds = new Set<string>();
 
     for (const cloudRec of cloudDailyRecords) {
-      const existing = localRecMap.get(cloudRec.id);
-      if (existing) {
-        if (existing.syncStatus === 'pending') {
-          mergedRecords.push(existing);
+      const key = `${cloudRec.retirementId}::${normalizeDate(cloudRec.date)}`;
+      const existingLocal = localRecById.get(cloudRec.id) || localRecByKey.get(key);
+
+      if (existingLocal) {
+        processedLocalIds.add(existingLocal.id);
+        if (existingLocal.syncStatus === 'pending') {
+          // Preserve local pending modifications
+          mergedRecords.push(existingLocal);
         } else {
+          // Cloud record takes precedence
           mergedRecords.push(cloudRec);
         }
-        localRecMap.delete(cloudRec.id);
       } else {
+        // New record from cloud
         mergedRecords.push(cloudRec);
       }
     }
 
-    localRecMap.forEach((local) => {
-      mergedRecords.push(local);
-    });
+    // Keep any remaining local daily records that were created locally/offline
+    for (const local of localRecords) {
+      if (!processedLocalIds.has(local.id)) {
+        mergedRecords.push(local);
+      }
+    }
 
     this.setItem(STORAGE_KEYS.DAILY_RECORDS, mergedRecords);
 

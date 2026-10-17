@@ -615,7 +615,7 @@ BEGIN
     FOR v_cat IN SELECT * FROM jsonb_array_elements(p_categories)
     LOOP
       v_sort_idx := v_sort_idx + 1;
-      v_cat_id := COALESCE((v_cat->>'id')::UUID, gen_random_uuid());
+      v_cat_id := COALESCE(NULLIF(v_cat->>'id', '')::UUID, gen_random_uuid());
       v_cat_name := TRIM(COALESCE(v_cat->>'name', 'General'));
       IF v_cat_name = '' THEN v_cat_name := 'General'; END IF;
       v_cat_subtotal := 0.00;
@@ -641,7 +641,7 @@ BEGIN
             -- Omit generated column 'amount'
             INSERT INTO public.expense_items (id, category_id, description, quantity, rate, created_at)
             VALUES (
-              COALESCE((v_item->>'id')::UUID, gen_random_uuid()),
+              COALESCE(NULLIF(v_item->>'id', '')::UUID, gen_random_uuid()),
               v_cat_id,
               v_item_desc,
               v_item_qty,
@@ -683,10 +683,15 @@ GRANT EXECUTE ON FUNCTION public.upsert_daily_record_hierarchy(UUID, UUID, DATE,
 -- ============================================================================
 -- 9. LEAST-PRIVILEGE TABLE & ROUTINE GRANTS
 -- ============================================================================
-REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
-REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM anon;
+-- Revoke all permissions from PUBLIC and anon exclusively on the 8 myRet tables
+REVOKE ALL ON TABLE public.profiles FROM PUBLIC, anon;
+REVOKE ALL ON TABLE public.retirements FROM PUBLIC, anon;
+REVOKE ALL ON TABLE public.retirement_access FROM PUBLIC, anon;
+REVOKE ALL ON TABLE public.daily_records FROM PUBLIC, anon;
+REVOKE ALL ON TABLE public.categories FROM PUBLIC, anon;
+REVOKE ALL ON TABLE public.expense_items FROM PUBLIC, anon;
+REVOKE ALL ON TABLE public.supplementary_entries FROM PUBLIC, anon;
+REVOKE ALL ON TABLE public.connected_retirements FROM PUBLIC, anon;
 
 GRANT SELECT, INSERT, UPDATE ON public.profiles TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.retirements TO authenticated;

@@ -1,5 +1,5 @@
 import { supabase, isSupabaseConfigured } from './supabaseClient';
-import { storage, setSyncTrigger } from './storage';
+import { storage, setSyncTrigger, normalizeDate } from './storage';
 import {
   Retirement,
   DailyRecord,
@@ -10,6 +10,7 @@ import {
   SyncState,
 } from '../types';
 import { generateUUID } from './codeGenerator';
+import { calculateAmount } from './currency';
 
 const SYNC_QUEUE_KEY = 'myret_sync_queue';
 const LAST_SYNC_KEY = 'myret_last_synced_at';
@@ -341,78 +342,131 @@ class SyncService {
 
       case 'UPSERT_DAILY_RECORD': {
         const record: DailyRecord = item.payload;
+        const normalizedDate = normalizeDate(record.date);
 
         // Try RPC upsert_daily_record_hierarchy first
         let rpcSuccess = false;
+        let rpcExecuted = false;
+
         try {
-          const { error: rpcError } = await supabase.rpc('upsert_daily_record_hierarchy', {
+          const { data: rpcData, error: rpcError } = await supabase.rpc('upsert_daily_record_hierarchy', {
             p_record_id: record.id,
             p_retirement_id: record.retirementId,
-            p_record_date: record.date,
+            p_record_date: normalizedDate,
             p_categories: record.categories,
             p_expected_version: null,
             p_client_updated_at: record.updatedAt || new Date().toISOString(),
           });
 
           if (!rpcError) {
-            rpcSuccess = true;
+            rpcExecuted = true;
+            if (rpcData && (rpcData.success === true || rpcData.daily_record_id)) {
+              rpcSuccess = true;
+            } else {
+              throw new Error(rpcData?.error || 'RPC upsert_daily_record_hierarchy returned unsuccessful response');
+            }
           } else {
-            console.warn('[SyncService] RPC upsert_daily_record_hierarchy failed, falling back to direct table queries:', rpcError.message);
+            // Check if error is specifically missing RPC in schema cache
+            const isMissingFn =
+              rpcError.code === 'PGRST202' ||
+              rpcError.code === '42883' ||
+              rpcError.message.toLowerCase().includes('schema cache') ||
+              rpcError.message.toLowerCase().includes('could not find the function');
+
+            if (!isMissingFn) {
+              // Real database / permission / constraint failure:
+              // Must NOT swallow or bypass checks with fallback. Throw immediately so operation stays pending in queue.
+              throw rpcError;
+            }
+            console.warn('[SyncService] RPC not found in schema cache, using direct queries fallback');
           }
-        } catch (rpcEx) {
+        } catch (rpcEx: any) {
+          if (rpcExecuted || (rpcEx?.code && rpcEx.code !== 'PGRST202' && rpcEx.code !== '42883')) {
+            throw rpcEx;
+          }
           console.warn('[SyncService] RPC call threw, attempting direct table fallback:', rpcEx);
         }
 
-        // Direct table fallback if RPC did not execute
+        // Direct table fallback ONLY if RPC function was missing from database
         if (!rpcSuccess) {
-          // 1. Upsert daily_record row
-          const { error: dError } = await supabase.from('daily_records').upsert(
-            {
-              id: record.id,
-              retirement_id: record.retirementId,
-              record_date: record.date,
-              daily_total: record.dailyTotal || 0,
-              updated_at: record.updatedAt || new Date().toISOString(),
-            },
-            { onConflict: 'retirement_id, record_date' }
-          );
-          if (dError) throw dError;
+          // 1. Recalculate daily total for consistency
+          const computedTotal = (record.categories || []).reduce((sum, cat) => {
+            const catSub = (cat.items || []).reduce((s, it) => {
+              const q = Number(it.quantity) || 0;
+              const r = Number(it.rate) || 0;
+              return s + (q > 0 && r > 0 ? calculateAmount(q, r) : (Number(it.amount) || 0));
+            }, 0);
+            return sum + catSub;
+          }, 0);
 
-          // 2. Clear old categories and re-insert categories & items
-          const { error: delCatError } = await supabase.from('categories').delete().eq('daily_record_id', record.id);
+          // 2. Upsert daily_record row
+          const { data: upsertedRow, error: dError } = await supabase
+            .from('daily_records')
+            .upsert(
+              {
+                id: record.id,
+                retirement_id: record.retirementId,
+                record_date: normalizedDate,
+                daily_total: computedTotal,
+                updated_at: record.updatedAt || new Date().toISOString(),
+              },
+              { onConflict: 'retirement_id, record_date' }
+            )
+            .select('id')
+            .single();
+
+          if (dError) throw dError;
+          const actualRecordId = upsertedRow?.id || record.id;
+
+          // 3. Clear old categories and re-insert categories & items
+          const { error: delCatError } = await supabase
+            .from('categories')
+            .delete()
+            .eq('daily_record_id', actualRecordId);
           if (delCatError) throw delCatError;
 
           if (record.categories && record.categories.length > 0) {
             for (let cIdx = 0; cIdx < record.categories.length; cIdx++) {
               const cat = record.categories[cIdx];
               const catId = cat.id || generateUUID();
+              const catSub = (cat.items || []).reduce((s, it) => {
+                const q = Number(it.quantity) || 0;
+                const r = Number(it.rate) || 0;
+                return s + (q > 0 && r > 0 ? calculateAmount(q, r) : (Number(it.amount) || 0));
+              }, 0);
+
               const { error: cError } = await supabase.from('categories').insert({
                 id: catId,
-                daily_record_id: record.id,
-                name: cat.name,
-                subtotal: cat.subtotal || 0,
+                daily_record_id: actualRecordId,
+                name: cat.name.trim() || 'General',
+                subtotal: catSub,
                 sort_order: cIdx,
               });
               if (cError) throw cError;
 
               if (cat.items && cat.items.length > 0) {
-                // Notice: DO NOT insert into generated column 'amount'!
-                const itemsToInsert = cat.items.map((it) => ({
-                  id: it.id || generateUUID(),
-                  category_id: catId,
-                  description: it.description,
-                  quantity: it.quantity,
-                  rate: it.rate,
-                  created_at: new Date().toISOString(),
-                }));
-                const { error: itError } = await supabase.from('expense_items').insert(itemsToInsert);
-                if (itError) throw itError;
+                // Generated column 'amount' is strictly omitted from inserts
+                const validItems = cat.items
+                  .filter((it) => it.description && it.description.trim().length > 0)
+                  .map((it) => ({
+                    id: it.id || generateUUID(),
+                    category_id: catId,
+                    description: it.description.trim(),
+                    quantity: Math.max(0, Number(it.quantity) || 0),
+                    rate: Math.max(0, Number(it.rate) || 0),
+                    created_at: new Date().toISOString(),
+                  }));
+
+                if (validItems.length > 0) {
+                  const { error: itError } = await supabase.from('expense_items').insert(validItems);
+                  if (itError) throw itError;
+                }
               }
             }
           }
         }
 
-        // Mark local daily record synced
+        // Mark local daily record synced ONLY upon complete success
         storage.markDailyRecordSynced(record.id);
         break;
       }
@@ -562,7 +616,10 @@ class SyncService {
 
       if (allCloudIds.length === 0) {
         // Run initial local-to-cloud migration if user has existing local retirements
-        await this.runInitialMigration(session.user);
+        await this.runInitialMigration(session.user, new Set(), new Set(), new Set());
+        if (typeof navigator !== 'undefined' && navigator.onLine) {
+          this.processQueue();
+        }
         return true;
       }
 
@@ -704,8 +761,16 @@ class SyncService {
       // Merge into local storage preserving locally pending changes
       storage.mergeCloudData(hydratedRetirements, assembledDailyRecords, assembledSupplementary);
 
-      // Run local-to-cloud initial sync for any un-synced user-owned local retirements
-      await this.runInitialMigration(session.user);
+      const cloudRetIdSet = new Set(allCloudIds);
+      const cloudDailyRecIdSet = new Set(dailyRecordIds);
+      const cloudSuppIdSet = new Set((cloudSupplementary || []).map((s) => s.id));
+
+      // Run local-to-cloud initial sync for any un-synced user-owned local records
+      await this.runInitialMigration(session.user, cloudRetIdSet, cloudDailyRecIdSet, cloudSuppIdSet);
+
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        this.processQueue();
+      }
 
       return true;
     } catch (err: any) {
@@ -717,29 +782,69 @@ class SyncService {
 
   // --- Initial Local-to-Cloud Migration ---
   // Safely migrates existing local records created before cloud connection to user account
-  async runInitialMigration(user: { id: string; email?: string }): Promise<void> {
+  async runInitialMigration(
+    user: { id: string; email?: string },
+    cloudRetirementIds?: Set<string>,
+    cloudDailyRecordIds?: Set<string>,
+    cloudSupplementaryIds?: Set<string>
+  ): Promise<void> {
     const localRetirements = storage.getRetirements(true); // include trash
-    const unuploaded = localRetirements.filter(
-      (r) => !r.isDemo && r.ownerId === user.id && r.syncStatus === 'pending'
-    );
 
-    if (unuploaded.length > 0) {
-      console.log(`[SyncService] Found ${unuploaded.length} local retirements to sync to cloud.`);
-      for (const ret of unuploaded) {
-        this.enqueue('UPSERT_RETIREMENT', ret.id, ret);
+    // Identify local retirements owned by current user (or created locally without ownerId), excluding demo
+    const eligibleRetirements = localRetirements.filter((r) => {
+      if (r.isDemo) return false;
+      // Do not upload another user's records
+      if (r.ownerId && r.ownerId !== user.id) return false;
+      return true;
+    });
 
-        // Also enqueue its daily records
-        const records = storage.getDailyRecords(ret.id);
-        for (const rec of records) {
-          if (rec.syncStatus === 'pending') {
+    for (const ret of eligibleRetirements) {
+      // Assign ownerId if missing locally
+      if (!ret.ownerId) {
+        ret.ownerId = user.id;
+        storage.saveRetirement(ret, true);
+      }
+
+      // If record is not known in cloud OR is marked pending, it needs upload
+      const isKnownInCloud = cloudRetirementIds ? cloudRetirementIds.has(ret.id) : false;
+      const needsUpload = !isKnownInCloud || ret.syncStatus === 'pending';
+
+      if (needsUpload) {
+        const alreadyQueued = this.queue.some(
+          (q) => q.type === 'UPSERT_RETIREMENT' && q.entityId === ret.id && q.status === 'pending'
+        );
+        if (!alreadyQueued) {
+          this.enqueue('UPSERT_RETIREMENT', ret.id, ret);
+        }
+      }
+
+      // Check daily records belonging to this retirement
+      const records = storage.getDailyRecords(ret.id);
+      for (const rec of records) {
+        const isRecInCloud = cloudDailyRecordIds ? cloudDailyRecordIds.has(rec.id) : false;
+        const recNeedsUpload = !isRecInCloud || rec.syncStatus === 'pending';
+
+        if (recNeedsUpload) {
+          const alreadyQueued = this.queue.some(
+            (q) => q.type === 'UPSERT_DAILY_RECORD' && q.entityId === rec.id && q.status === 'pending'
+          );
+          if (!alreadyQueued) {
             this.enqueue('UPSERT_DAILY_RECORD', rec.id, rec, ret.id);
           }
         }
+      }
 
-        // Also enqueue its supplementary entries
-        const supplementary = storage.getSupplementaryEntries(ret.id);
-        for (const supp of supplementary) {
-          if (supp.syncStatus === 'pending') {
+      // Check supplementary entries belonging to this retirement
+      const supplementary = storage.getSupplementaryEntries(ret.id);
+      for (const supp of supplementary) {
+        const isSuppInCloud = cloudSupplementaryIds ? cloudSupplementaryIds.has(supp.id) : false;
+        const suppNeedsUpload = !isSuppInCloud || supp.syncStatus === 'pending';
+
+        if (suppNeedsUpload) {
+          const alreadyQueued = this.queue.some(
+            (q) => q.type === 'UPSERT_SUPPLEMENTARY' && q.entityId === supp.id && q.status === 'pending'
+          );
+          if (!alreadyQueued) {
             this.enqueue('UPSERT_SUPPLEMENTARY', supp.id, supp, ret.id);
           }
         }
