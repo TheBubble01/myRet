@@ -42,6 +42,7 @@ export interface DailyRecord {
   dailyTotal: number; // sum of category subtotals
   createdAt: string;
   updatedAt: string;
+  baseUpdatedAt?: string; // Last synced cloud updatedAt timestamp
   syncStatus: 'synced' | 'pending';
 }
 

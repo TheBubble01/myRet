@@ -15,6 +15,7 @@ type SyncTrigger = (type: SyncOperationType, entityId: string, payload: any, ret
 let globalSyncTrigger: SyncTrigger | null = null;
 export function setSyncTrigger(fn: SyncTrigger) {
   globalSyncTrigger = fn;
+  storage.runExpiredTrashCleanup();
 }
 
 /**
@@ -73,7 +74,6 @@ export interface SupabaseConfig {
 class StorageService {
   constructor() {
     this.initDefaults();
-    this.cleanupExpiredTrash();
   }
 
   private getItem<T>(key: string, defaultValue: T): T {
@@ -171,14 +171,23 @@ class StorageService {
   // --- Retirements ---
   getRetirements(includeTrash: boolean = false): Retirement[] {
     this.cleanupExpiredTrash();
-    const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const currentUser = this.getCurrentUser();
     if (!currentUser) return [];
+
+    // Safely reconcile any legacy owned retirements for currentUser before filtering
+    this.reconcileLegacyOwnedRetirements(currentUser);
+
+    const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
+    const normEmail = (currentUser.email || '').trim().toLowerCase();
 
     // Check permissions: Owner OR Access list contains user ID or email
     const accessible = all.filter((r) => {
       if (r.ownerId === currentUser.id) return true;
-      return r.access.some((a) => a.userId === currentUser.id || a.userEmail.toLowerCase() === currentUser.email.toLowerCase());
+      return (r.access || []).some(
+        (a) =>
+          a.userId === currentUser.id ||
+          (normEmail !== '' && (a.userEmail || '').trim().toLowerCase() === normEmail)
+      );
     });
 
     if (includeTrash) {
@@ -187,11 +196,132 @@ class StorageService {
     return accessible.filter((r) => r.status === 'active');
   }
 
-  getTrashRetirements(): Retirement[] {
+  /**
+   * Inspects raw local retirements and recovers legacy records only when ownership
+   * by the authenticated user can be positively established from existing local account data.
+   * Unverified records or records belonging to other accounts are preserved locally untouched.
+   */
+  reconcileLegacyOwnedRetirements(user: { id: string; email?: string }): Retirement[] {
     this.cleanupExpiredTrash();
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
+    const knownUsers = this.getAllUsers();
+    const normUserEmail = (user.email || '').trim().toLowerCase();
+    let modified = false;
+    const ownedByUser: Retirement[] = [];
+
+    for (const r of all) {
+      if (r.isDemo) continue;
+
+      if (r.ownerId === user.id) {
+        ownedByUser.push(r);
+        continue;
+      }
+
+      const accessList = Array.isArray(r.access) ? r.access : [];
+
+      // If the user is explicitly listed ONLY as a REVIEWER, never claim ownership
+      const isReviewerOnly =
+        accessList.some(
+          (a) =>
+            a.role === 'REVIEWER' &&
+            (a.userId === user.id ||
+              (normUserEmail !== '' && (a.userEmail || '').trim().toLowerCase() === normUserEmail))
+        ) &&
+        !accessList.some(
+          (a) =>
+            a.role === 'OWNER' &&
+            (a.userId === user.id ||
+              (normUserEmail !== '' && (a.userEmail || '').trim().toLowerCase() === normUserEmail))
+        );
+
+      if (isReviewerOnly) {
+        continue;
+      }
+
+      // Check if an OWNER access entry exists
+      const ownerAccess = accessList.find((a) => a.role === 'OWNER');
+      const ownerAccessEmail = (ownerAccess?.userEmail || '').trim().toLowerCase();
+
+      // If OWNER access explicitly specifies a different user's email, exclude it
+      if (ownerAccessEmail !== '' && normUserEmail !== '' && ownerAccessEmail !== normUserEmail) {
+        continue;
+      }
+
+      // Check positive ownership criteria:
+      // 1. OWNER access entry matches user.id or user.email
+      const matchedViaOwnerAccess =
+        Boolean(ownerAccess) &&
+        (ownerAccess!.userId === user.id ||
+          (normUserEmail !== '' && ownerAccessEmail === normUserEmail));
+
+      // 2. Legacy r.ownerId maps to a local UserProfile in myret_users_list with the exact same email
+      const legacyOwnerProfile = r.ownerId ? knownUsers.find((u) => u.id === r.ownerId) : undefined;
+      const legacyOwnerEmail = (legacyOwnerProfile?.email || '').trim().toLowerCase();
+      const matchedViaLegacyProfile =
+        Boolean(legacyOwnerProfile) &&
+        normUserEmail !== '' &&
+        legacyOwnerEmail !== '' &&
+        legacyOwnerEmail === normUserEmail;
+
+      // If legacyOwnerProfile exists with a different email, it belongs to another account
+      if (legacyOwnerProfile && legacyOwnerEmail !== '' && legacyOwnerEmail !== normUserEmail) {
+        continue;
+      }
+
+      // 3. Pre-auth legacy retirement with no ownerId on a single-user device (and no conflicting owner access)
+      const hasOtherLocalUsers = knownUsers.some((u) => {
+        const uEmail = (u.email || '').trim().toLowerCase();
+        if (u.id === user.id) return false;
+        if (normUserEmail !== '' && uEmail !== '' && uEmail === normUserEmail) return false;
+        return true;
+      });
+      const hasConflictingOwnerAccess =
+        Boolean(ownerAccess) &&
+        ((ownerAccess!.userId && ownerAccess!.userId !== user.id && ownerAccessEmail !== normUserEmail) ||
+          (ownerAccessEmail !== '' && ownerAccessEmail !== normUserEmail));
+      const matchedSingleUserUnownedLegacy =
+        (!r.ownerId || r.ownerId.trim() === '') &&
+        !hasOtherLocalUsers &&
+        !hasConflictingOwnerAccess;
+
+      if (matchedViaOwnerAccess || matchedViaLegacyProfile || matchedSingleUserUnownedLegacy) {
+        r.ownerId = user.id;
+        r.syncStatus = 'pending';
+        if (ownerAccess) {
+          ownerAccess.userId = user.id;
+          if (user.email && !ownerAccess.userEmail) {
+            ownerAccess.userEmail = user.email;
+          }
+        } else {
+          r.access = [
+            {
+              userId: user.id,
+              userEmail: user.email || '',
+              userName: r.ownerName || 'Site Engineer',
+              role: 'OWNER',
+              grantedAt: r.createdAt || new Date().toISOString(),
+            },
+            ...accessList,
+          ];
+        }
+        modified = true;
+        ownedByUser.push(r);
+      }
+    }
+
+    if (modified) {
+      this.setItem(STORAGE_KEYS.RETIREMENTS, all);
+    }
+
+    return ownedByUser;
+  }
+
+  getTrashRetirements(): Retirement[] {
+    this.cleanupExpiredTrash();
     const currentUser = this.getCurrentUser();
     if (!currentUser) return [];
+    this.reconcileLegacyOwnedRetirements(currentUser);
+    const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const isAdmin =
       currentUser.role === 'admin' ||
       currentUser.role === 'tech-admin' ||
@@ -273,6 +403,15 @@ class StorageService {
   permanentlyDelete(id: string, skipSync: boolean = false): boolean {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const target = all.find((r) => r.id === id);
+
+    // Record cloud deletion operation first before removing local data
+    if (!skipSync && target && !target.isDemo) {
+      if (!globalSyncTrigger) {
+        return false;
+      }
+      globalSyncTrigger('DELETE_RETIREMENT', id, { id }, id);
+    }
+
     const filtered = all.filter((r) => r.id !== id);
     this.setItem(STORAGE_KEYS.RETIREMENTS, filtered);
 
@@ -295,33 +434,43 @@ class StorageService {
       logs.filter((l) => l.retirementId !== id)
     );
 
-    if (!skipSync && target && !target.isDemo && globalSyncTrigger) {
-      globalSyncTrigger('DELETE_RETIREMENT', id, { id });
-    }
-
     return true;
+  }
+
+  runExpiredTrashCleanup(): void {
+    this.cleanupExpiredTrash();
   }
 
   private cleanupExpiredTrash(): void {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const now = Date.now();
-    const expired: Retirement[] = [];
-    const surviving = all.filter((r) => {
+    const expiredToRemove: Retirement[] = [];
+    const surviving: Retirement[] = [];
+
+    for (const r of all) {
       if (r.status === 'in_trash' && r.deletedAt) {
         const deletedTime = new Date(r.deletedAt).getTime();
-        if (now - deletedTime > TRASH_RETENTION_MS) {
-          expired.push(r);
-          return false; // Prune expired item
+        if (!isNaN(deletedTime) && now - deletedTime > TRASH_RETENTION_MS) {
+          if (r.isDemo) {
+            expiredToRemove.push(r);
+            continue;
+          }
+          // Do not remove non-demo expired items until globalSyncTrigger is available to record DELETE_RETIREMENT
+          if (globalSyncTrigger) {
+            globalSyncTrigger('DELETE_RETIREMENT', r.id, { id: r.id }, r.id);
+            expiredToRemove.push(r);
+            continue;
+          }
         }
       }
-      return true;
-    });
+      surviving.push(r);
+    }
 
-    if (surviving.length !== all.length) {
+    if (expiredToRemove.length > 0) {
       this.setItem(STORAGE_KEYS.RETIREMENTS, surviving);
 
-      // Clean up child daily records and supplementary for expired items
-      const expiredIds = new Set(expired.map((e) => e.id));
+      // Clean up child daily records, supplementary entries, and activity logs for expired items
+      const expiredIds = new Set(expiredToRemove.map((e) => e.id));
       const records = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
       this.setItem(
         STORAGE_KEYS.DAILY_RECORDS,
@@ -334,14 +483,11 @@ class StorageService {
         supp.filter((s) => !expiredIds.has(s.retirementId))
       );
 
-      // Trigger cloud deletion for expired non-demo retirements so they are not stranded
-      if (globalSyncTrigger) {
-        for (const item of expired) {
-          if (!item.isDemo) {
-            globalSyncTrigger('DELETE_RETIREMENT', item.id, { id: item.id });
-          }
-        }
-      }
+      const logs = this.getItem<ActivityLog[]>(STORAGE_KEYS.ACTIVITY_LOGS, []);
+      this.setItem(
+        STORAGE_KEYS.ACTIVITY_LOGS,
+        logs.filter((l) => !expiredIds.has(l.retirementId))
+      );
     }
   }
 
@@ -498,10 +644,14 @@ class StorageService {
     );
 
     let savedRecord = record;
+    let oldRecordToDeleteFromCloud: { id: string; retirementId: string; date: string } | null = null;
 
     if (sameDateIndex >= 0) {
       // An entry for this date already exists! Combine into that single Daily Retirement
       const targetRecord = rawRecords[sameDateIndex];
+      if (targetRecord.syncStatus === 'synced') {
+        targetRecord.baseUpdatedAt = targetRecord.baseUpdatedAt || targetRecord.updatedAt;
+      }
       this.mergeRecordCategories(targetRecord, record);
       if (!skipSync) {
         targetRecord.syncStatus = 'pending';
@@ -510,11 +660,35 @@ class StorageService {
 
       // If the incoming record was already in rawRecords with a different ID/date, remove it
       if (existingByIdIndex >= 0 && existingByIdIndex !== sameDateIndex) {
+        const prev = rawRecords[existingByIdIndex];
+        const prevDate = normalizeDate(prev.date);
+        if (prevDate !== normalizedDate) {
+          oldRecordToDeleteFromCloud = {
+            id: prev.id,
+            retirementId: prev.retirementId,
+            date: prevDate,
+          };
+        }
         rawRecords.splice(existingByIdIndex, 1);
       }
       this.setItem(STORAGE_KEYS.DAILY_RECORDS, rawRecords);
     } else if (existingByIdIndex >= 0) {
       // In-place edit of existing record
+      const prev = rawRecords[existingByIdIndex];
+      const prevDate = normalizeDate(prev.date);
+      if (prevDate !== normalizedDate) {
+        // Date changed on an existing record: delete old date row in cloud and assign fresh ID for new date
+        oldRecordToDeleteFromCloud = {
+          id: prev.id,
+          retirementId: prev.retirementId,
+          date: prevDate,
+        };
+        record.id = generateUUID();
+        delete record.baseUpdatedAt;
+      } else {
+        record.baseUpdatedAt =
+          prev.syncStatus === 'synced' ? prev.baseUpdatedAt || prev.updatedAt : prev.baseUpdatedAt;
+      }
       rawRecords[existingByIdIndex] = record;
       this.setItem(STORAGE_KEYS.DAILY_RECORDS, rawRecords);
     } else {
@@ -530,12 +704,22 @@ class StorageService {
     }
 
     if (!skipSync && globalSyncTrigger) {
+      if (oldRecordToDeleteFromCloud) {
+        globalSyncTrigger(
+          'DELETE_DAILY_RECORD',
+          oldRecordToDeleteFromCloud.id,
+          oldRecordToDeleteFromCloud,
+          oldRecordToDeleteFromCloud.retirementId
+        );
+      }
       globalSyncTrigger('UPSERT_DAILY_RECORD', savedRecord.id, savedRecord, savedRecord.retirementId);
     }
   }
 
   deleteDailyRecord(id: string, retirementId: string, skipSync: boolean = false): void {
     const records = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
+    const target = records.find((r) => r.id === id);
+    const targetDate = target ? normalizeDate(target.date) : undefined;
     const filtered = records.filter((r) => r.id !== id);
     this.setItem(STORAGE_KEYS.DAILY_RECORDS, filtered);
 
@@ -545,7 +729,12 @@ class StorageService {
     }
 
     if (!skipSync && globalSyncTrigger) {
-      globalSyncTrigger('DELETE_DAILY_RECORD', id, { id, retirementId }, retirementId);
+      globalSyncTrigger(
+        'DELETE_DAILY_RECORD',
+        id,
+        { id, retirementId, date: targetDate },
+        retirementId
+      );
     }
   }
 
@@ -770,11 +959,17 @@ class StorageService {
     }
   }
 
-  markDailyRecordSynced(id: string): void {
+  markDailyRecordSynced(id: string, authoritativeCloudId?: string, cloudUpdatedAt?: string): void {
     const records = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
-    const index = records.findIndex((r) => r.id === id);
+    const index = records.findIndex(
+      (r) => r.id === id || (authoritativeCloudId && r.id === authoritativeCloudId)
+    );
     if (index >= 0) {
+      if (authoritativeCloudId && authoritativeCloudId !== records[index].id) {
+        records[index].id = authoritativeCloudId;
+      }
       records[index].syncStatus = 'synced';
+      records[index].baseUpdatedAt = cloudUpdatedAt || records[index].updatedAt;
       this.setItem(STORAGE_KEYS.DAILY_RECORDS, records);
     }
   }
@@ -788,11 +983,250 @@ class StorageService {
     }
   }
 
+  /**
+   * Reconciles a local DailyRecord and a cloud DailyRecord that share the same
+   * canonical identity (retirementId, normalized calendar date).
+   * - Adopts the authoritative cloud record ID (cloudRec.id).
+   * - Preserves local pending modifications without losing cloud-side expense items.
+   * - Deduplicates identical logical expenses.
+   * - Preserves both versions and reports a conflict when conflicting edits exist.
+   */
+  private reconcileDailyRecordWithCloud(
+    localRec: DailyRecord,
+    cloudRec: DailyRecord
+  ): {
+    record: DailyRecord;
+    needsCloudPush: boolean;
+    conflictMessages: string[];
+  } {
+    const conflictMessages: string[] = [];
+    const normDate = normalizeDate(cloudRec.date);
+
+    // 1. If local record is already synced with the exact same cloud ID, cloud is authoritative
+    if (localRec.syncStatus !== 'pending' && localRec.id === cloudRec.id) {
+      return {
+        record: {
+          ...cloudRec,
+          date: normDate,
+          baseUpdatedAt: cloudRec.updatedAt,
+          syncStatus: 'synced',
+        },
+        needsCloudPush: false,
+        conflictMessages,
+      };
+    }
+
+    // 2. If local record is pending, shares the same ID, and cloud has not changed since baseUpdatedAt,
+    //    then localRec is a clean descendant of cloudRec (user's own offline edit/deletion).
+    if (
+      localRec.syncStatus === 'pending' &&
+      localRec.id === cloudRec.id &&
+      localRec.baseUpdatedAt &&
+      localRec.baseUpdatedAt === cloudRec.updatedAt
+    ) {
+      return {
+        record: {
+          ...localRec,
+          id: cloudRec.id,
+          date: normDate,
+          baseUpdatedAt: cloudRec.updatedAt,
+          syncStatus: 'pending',
+        },
+        needsCloudPush: true,
+        conflictMessages,
+      };
+    }
+
+    // 3. Divergent versions (different local vs. cloud IDs for the same date, or concurrent edits):
+    //    Reconcile categories and expense items while adopting cloudRec.id.
+    let needsCloudPush = localRec.syncStatus === 'pending' || localRec.id !== cloudRec.id;
+
+    const reconciledCategories = (localRec.categories || []).map((cat) => ({
+      ...cat,
+      id: cat.id || generateUUID(),
+      name: cat.name.trim() || 'General',
+      items: (cat.items || []).map((item) => {
+        const qty = Number(item.quantity) || 0;
+        const rt = Number(item.rate) || 0;
+        const amt = qty > 0 && rt > 0 ? calculateAmount(qty, rt) : Number(item.amount) || 0;
+        return {
+          ...item,
+          id: item.id || generateUUID(),
+          description: item.description.trim(),
+          quantity: qty,
+          rate: rt,
+          amount: amt,
+        };
+      }),
+      subtotal: 0,
+    }));
+
+    for (const cloudCat of cloudRec.categories || []) {
+      const cCatName = (cloudCat.name || 'General').trim();
+      const localCat = reconciledCategories.find(
+        (c) => c.name.trim().toLowerCase() === cCatName.toLowerCase()
+      );
+
+      if (!localCat) {
+        // Cloud category does not exist locally -> preserve cloud category and its items
+        const clonedItems = (cloudCat.items || []).map((it) => {
+          const qty = Number(it.quantity) || 0;
+          const rt = Number(it.rate) || 0;
+          const amt = qty > 0 && rt > 0 ? calculateAmount(qty, rt) : Number(it.amount) || 0;
+          return {
+            id: it.id || generateUUID(),
+            description: (it.description || '').trim(),
+            quantity: qty,
+            rate: rt,
+            amount: amt,
+          };
+        });
+        reconciledCategories.push({
+          id: cloudCat.id || generateUUID(),
+          name: cCatName,
+          items: clonedItems,
+          subtotal: clonedItems.reduce((s, i) => s + i.amount, 0),
+        });
+        needsCloudPush = true;
+      } else {
+        // Category exists in both -> reconcile expense items
+        for (const cloudItem of cloudCat.items || []) {
+          const cDesc = (cloudItem.description || '').trim();
+          const cQty = Number(cloudItem.quantity) || 0;
+          const cRate = Number(cloudItem.rate) || 0;
+          const cAmt = cQty > 0 && cRate > 0 ? calculateAmount(cQty, cRate) : Number(cloudItem.amount) || 0;
+
+          // Match 1: Same item ID
+          const sameIdItem = localCat.items.find((i) => i.id === cloudItem.id);
+          if (sameIdItem) {
+            const isIdentical =
+              sameIdItem.description.trim().toLowerCase() === cDesc.toLowerCase() &&
+              Number(sameIdItem.quantity) === cQty &&
+              Number(sameIdItem.rate) === cRate;
+
+            if (!isIdentical) {
+              // Conflicting edits on the same item ID: preserve both versions and report conflict
+              const conflictDesc = `${cDesc} (Cloud conflict copy)`;
+              const alreadyHasConflictCopy = localCat.items.some(
+                (i) =>
+                  i.description.trim().toLowerCase() === conflictDesc.toLowerCase() &&
+                  Number(i.quantity) === cQty &&
+                  Number(i.rate) === cRate
+              );
+              if (!alreadyHasConflictCopy) {
+                localCat.items.push({
+                  id: generateUUID(),
+                  description: conflictDesc,
+                  quantity: cQty,
+                  rate: cRate,
+                  amount: cAmt,
+                });
+              }
+              conflictMessages.push(
+                `Conflicting edit on "${cDesc}" in category "${cCatName}" (${normDate}); both local and cloud versions were preserved.`
+              );
+              needsCloudPush = true;
+            }
+            continue;
+          }
+
+          // Match 2: Identical logical expense (same normalized description, quantity, and rate)
+          const sameLogicalItem = localCat.items.find(
+            (i) =>
+              cDesc !== '' &&
+              i.description.trim().toLowerCase() === cDesc.toLowerCase() &&
+              Number(i.quantity) === cQty &&
+              Number(i.rate) === cRate
+          );
+          if (sameLogicalItem) {
+            // Reconcile item ID to cloud item ID and avoid duplicate expense
+            sameLogicalItem.id = cloudItem.id || sameLogicalItem.id;
+            continue;
+          }
+
+          // Match 3: Same normalized description in the same category, but different quantity or rate
+          const sameDescDifferentValues = localCat.items.find(
+            (i) => cDesc !== '' && i.description.trim().toLowerCase() === cDesc.toLowerCase()
+          );
+          if (sameDescDifferentValues) {
+            const conflictDesc = `${cDesc} (Cloud conflict copy)`;
+            const alreadyHasConflictCopy = localCat.items.some(
+              (i) =>
+                i.description.trim().toLowerCase() === conflictDesc.toLowerCase() &&
+                Number(i.quantity) === cQty &&
+                Number(i.rate) === cRate
+            );
+            if (!alreadyHasConflictCopy) {
+              localCat.items.push({
+                id: cloudItem.id || generateUUID(),
+                description: conflictDesc,
+                quantity: cQty,
+                rate: cRate,
+                amount: cAmt,
+              });
+            }
+            conflictMessages.push(
+              `Conflicting values for "${cDesc}" in category "${cCatName}" (${normDate}); both local and cloud versions were preserved.`
+            );
+            needsCloudPush = true;
+            continue;
+          }
+
+          // Match 4: Distinct cloud-side expense item not present locally -> preserve it
+          localCat.items.push({
+            id: cloudItem.id || generateUUID(),
+            description: cDesc,
+            quantity: cQty,
+            rate: cRate,
+            amount: cAmt,
+          });
+          needsCloudPush = true;
+        }
+      }
+    }
+
+    // Recalculate all category subtotals and dailyTotal
+    reconciledCategories.forEach((cat) => {
+      cat.subtotal = cat.items.reduce((sum, it) => {
+        const q = Number(it.quantity) || 0;
+        const r = Number(it.rate) || 0;
+        const amt = q > 0 && r > 0 ? calculateAmount(q, r) : Number(it.amount) || 0;
+        it.amount = amt;
+        return sum + amt;
+      }, 0);
+    });
+    const dailyTotal = reconciledCategories.reduce((sum, cat) => sum + cat.subtotal, 0);
+
+    const reconciledRecord: DailyRecord = {
+      id: cloudRec.id, // Always adopt authoritative cloud UUID for (retirementId, date)
+      retirementId: cloudRec.retirementId,
+      date: normDate,
+      categories: reconciledCategories,
+      dailyTotal,
+      createdAt: cloudRec.createdAt || localRec.createdAt,
+      updatedAt: needsCloudPush ? new Date().toISOString() : cloudRec.updatedAt,
+      baseUpdatedAt: cloudRec.updatedAt,
+      syncStatus: needsCloudPush ? 'pending' : 'synced',
+    };
+
+    return {
+      record: reconciledRecord,
+      needsCloudPush,
+      conflictMessages,
+    };
+  }
+
   mergeCloudData(
     cloudRetirements: Retirement[],
     cloudDailyRecords: DailyRecord[],
     cloudSupplementary: SupplementaryEntry[]
-  ): void {
+  ): {
+    reconciledDailyRecords: { oldId: string; newId: string; record: DailyRecord }[];
+    conflicts: string[];
+  } {
+    const reconciledDailyRecords: { oldId: string; newId: string; record: DailyRecord }[] = [];
+    const conflicts: string[] = [];
+
     // 1. Merge Retirements
     const localRetirements = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const demoRetirements = localRetirements.filter((r) => r.isDemo);
@@ -828,41 +1262,91 @@ class StorageService {
     this.setItem(STORAGE_KEYS.RETIREMENTS, mergedRetirements);
 
     // 2. Merge Daily Records (Enforcing 1 record per retirement per calendar date)
-    const localRecords = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
-    const mergedRecords: DailyRecord[] = [];
-    
-    // Index local records by ID and by canonical key: `${retirementId}::${normalizeDate(date)}`
-    const localRecById = new Map<string, DailyRecord>();
-    const localRecByKey = new Map<string, DailyRecord>();
-    for (const r of localRecords) {
-      localRecById.set(r.id, r);
-      localRecByKey.set(`${r.retirementId}::${normalizeDate(r.date)}`, r);
-    }
+    const rawLocalRecords = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
 
-    const processedLocalIds = new Set<string>();
-
-    for (const cloudRec of cloudDailyRecords) {
-      const key = `${cloudRec.retirementId}::${normalizeDate(cloudRec.date)}`;
-      const existingLocal = localRecById.get(cloudRec.id) || localRecByKey.get(key);
-
-      if (existingLocal) {
-        processedLocalIds.add(existingLocal.id);
-        if (existingLocal.syncStatus === 'pending') {
-          // Preserve local pending modifications
-          mergedRecords.push(existingLocal);
-        } else {
-          // Cloud record takes precedence
-          mergedRecords.push(cloudRec);
-        }
+    // First consolidate rawLocalRecords by canonical key `${retirementId}::${normalizeDate(date)}`
+    const consolidatedLocalByKey = new Map<string, DailyRecord>();
+    for (const r of rawLocalRecords) {
+      const normDate = normalizeDate(r.date);
+      const key = `${r.retirementId}::${normDate}`;
+      const normalizedRec: DailyRecord = { ...r, date: normDate };
+      if (!consolidatedLocalByKey.has(key)) {
+        consolidatedLocalByKey.set(key, normalizedRec);
       } else {
-        // New record from cloud
-        mergedRecords.push(cloudRec);
+        const target = consolidatedLocalByKey.get(key)!;
+        const wasPending = target.syncStatus === 'pending' || normalizedRec.syncStatus === 'pending';
+        this.mergeRecordCategories(target, normalizedRec);
+        if (wasPending) {
+          target.syncStatus = 'pending';
+        }
       }
     }
 
-    // Keep any remaining local daily records that were created locally/offline
+    const localRecords = Array.from(consolidatedLocalByKey.values());
+    const localRecById = new Map<string, DailyRecord>();
+    for (const r of localRecords) {
+      localRecById.set(r.id, r);
+    }
+
+    const mergedRecords: DailyRecord[] = [];
+    const processedLocalIds = new Set<string>();
+    const processedKeys = new Set<string>();
+
+    for (const rawCloudRec of cloudDailyRecords) {
+      const normCloudDate = normalizeDate(rawCloudRec.date);
+      const cloudRec: DailyRecord = {
+        ...rawCloudRec,
+        date: normCloudDate,
+        baseUpdatedAt: rawCloudRec.updatedAt,
+      };
+      const key = `${cloudRec.retirementId}::${normCloudDate}`;
+      if (processedKeys.has(key)) continue;
+      processedKeys.add(key);
+
+      // Match by canonical (retirementId, date) key first
+      const byKey = consolidatedLocalByKey.get(key);
+      let existingLocal: DailyRecord | undefined =
+        byKey && !processedLocalIds.has(byKey.id) ? byKey : undefined;
+
+      // If no local record exists for this date, check if an unmodified local record shares cloudRec.id
+      if (!existingLocal) {
+        const byId = localRecById.get(cloudRec.id);
+        if (byId && !processedLocalIds.has(byId.id) && byId.syncStatus !== 'pending') {
+          processedLocalIds.add(byId.id);
+        }
+        mergedRecords.push(cloudRec);
+        continue;
+      }
+
+      processedLocalIds.add(existingLocal.id);
+
+      const { record: reconciled, needsCloudPush, conflictMessages } =
+        this.reconcileDailyRecordWithCloud(existingLocal, cloudRec);
+
+      mergedRecords.push(reconciled);
+
+      if (existingLocal.id !== cloudRec.id || needsCloudPush) {
+        reconciledDailyRecords.push({
+          oldId: existingLocal.id,
+          newId: cloudRec.id,
+          record: reconciled,
+        });
+      }
+
+      if (conflictMessages.length > 0) {
+        conflicts.push(...conflictMessages);
+        for (const msg of conflictMessages) {
+          this.logActivity(cloudRec.retirementId, 'Sync Conflict Preserved', msg);
+        }
+      }
+    }
+
+    // Keep any remaining local daily records that were created locally/offline for other dates
     for (const local of localRecords) {
-      if (!processedLocalIds.has(local.id)) {
+      const key = `${local.retirementId}::${normalizeDate(local.date)}`;
+      if (!processedLocalIds.has(local.id) && !processedKeys.has(key)) {
+        processedLocalIds.add(local.id);
+        processedKeys.add(key);
         mergedRecords.push(local);
       }
     }
@@ -893,6 +1377,8 @@ class StorageService {
     });
 
     this.setItem(STORAGE_KEYS.SUPPLEMENTARY, mergedSupp);
+
+    return { reconciledDailyRecords, conflicts };
   }
 }
 

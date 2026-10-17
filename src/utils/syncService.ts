@@ -122,6 +122,23 @@ class SyncService {
       return;
     }
 
+    // Purge superseded pending upserts when an entity or parent retirement is deleted
+    if (type === 'DELETE_RETIREMENT') {
+      this.queue = this.queue.filter(
+        (item) =>
+          item.type === 'DELETE_RETIREMENT' ||
+          (item.entityId !== entityId && item.retirementId !== entityId)
+      );
+    } else if (type === 'DELETE_DAILY_RECORD') {
+      this.queue = this.queue.filter(
+        (item) => !(item.type === 'UPSERT_DAILY_RECORD' && item.entityId === entityId)
+      );
+    } else if (type === 'DELETE_SUPPLEMENTARY') {
+      this.queue = this.queue.filter(
+        (item) => !(item.type === 'UPSERT_SUPPLEMENTARY' && item.entityId === entityId)
+      );
+    }
+
     // Coalesce updates to the same entity in pending queue
     const existingIndex = this.queue.findIndex(
       (item) => item.entityId === entityId && item.type === type && item.status === 'pending'
@@ -194,6 +211,9 @@ class SyncService {
 
   // --- Queue Processor (Push Changes to Supabase) ---
   async processQueue(): Promise<void> {
+    // Ensure any newly expired trash items are converted into DELETE_RETIREMENT operations
+    storage.runExpiredTrashCleanup();
+
     if (this.isProcessing) return;
     if (!isSupabaseConfigured) return;
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
@@ -343,6 +363,8 @@ class SyncService {
       case 'UPSERT_DAILY_RECORD': {
         const record: DailyRecord = item.payload;
         const normalizedDate = normalizeDate(record.date);
+        let authoritativeRecordId = record.id;
+        let authoritativeUpdatedAt = record.updatedAt || new Date().toISOString();
 
         // Try RPC upsert_daily_record_hierarchy first
         let rpcSuccess = false;
@@ -355,13 +377,19 @@ class SyncService {
             p_record_date: normalizedDate,
             p_categories: record.categories,
             p_expected_version: null,
-            p_client_updated_at: record.updatedAt || new Date().toISOString(),
+            p_client_updated_at: authoritativeUpdatedAt,
           });
 
           if (!rpcError) {
             rpcExecuted = true;
             if (rpcData && (rpcData.success === true || rpcData.daily_record_id)) {
               rpcSuccess = true;
+              if (rpcData.daily_record_id) {
+                authoritativeRecordId = String(rpcData.daily_record_id);
+              }
+              if (rpcData.updated_at) {
+                authoritativeUpdatedAt = String(rpcData.updated_at);
+              }
             } else {
               throw new Error(rpcData?.error || 'RPC upsert_daily_record_hierarchy returned unsuccessful response');
             }
@@ -408,21 +436,24 @@ class SyncService {
                 retirement_id: record.retirementId,
                 record_date: normalizedDate,
                 daily_total: computedTotal,
-                updated_at: record.updatedAt || new Date().toISOString(),
+                updated_at: authoritativeUpdatedAt,
               },
               { onConflict: 'retirement_id, record_date' }
             )
-            .select('id')
+            .select('id, updated_at')
             .single();
 
           if (dError) throw dError;
-          const actualRecordId = upsertedRow?.id || record.id;
+          authoritativeRecordId = upsertedRow?.id || record.id;
+          if (upsertedRow?.updated_at) {
+            authoritativeUpdatedAt = String(upsertedRow.updated_at);
+          }
 
           // 3. Clear old categories and re-insert categories & items
           const { error: delCatError } = await supabase
             .from('categories')
             .delete()
-            .eq('daily_record_id', actualRecordId);
+            .eq('daily_record_id', authoritativeRecordId);
           if (delCatError) throw delCatError;
 
           if (record.categories && record.categories.length > 0) {
@@ -437,7 +468,7 @@ class SyncService {
 
               const { error: cError } = await supabase.from('categories').insert({
                 id: catId,
-                daily_record_id: actualRecordId,
+                daily_record_id: authoritativeRecordId,
                 name: cat.name.trim() || 'General',
                 subtotal: catSub,
                 sort_order: cIdx,
@@ -466,15 +497,37 @@ class SyncService {
           }
         }
 
-        // Mark local daily record synced ONLY upon complete success
-        storage.markDailyRecordSynced(record.id);
+        // Reconcile any queued operations referencing the old daily record ID
+        if (authoritativeRecordId !== record.id) {
+          for (const qItem of this.queue) {
+            if (qItem.id !== item.id && qItem.entityId === record.id) {
+              qItem.entityId = authoritativeRecordId;
+              if (qItem.payload && typeof qItem.payload === 'object' && 'id' in qItem.payload) {
+                qItem.payload = { ...qItem.payload, id: authoritativeRecordId };
+              }
+            }
+          }
+        }
+
+        // Mark local daily record synced ONLY upon complete success, updating to authoritative cloud ID
+        storage.markDailyRecordSynced(record.id, authoritativeRecordId, authoritativeUpdatedAt);
         break;
       }
 
       case 'DELETE_DAILY_RECORD': {
-        const { id } = item.payload;
-        const { error } = await supabase.from('daily_records').delete().eq('id', id);
-        if (error && error.code !== 'PGRST116') throw error;
+        const { id, retirementId, date } = item.payload || {};
+        if (id) {
+          const { error } = await supabase.from('daily_records').delete().eq('id', id);
+          if (error && error.code !== 'PGRST116') throw error;
+        }
+        if (retirementId && date) {
+          const { error: keyErr } = await supabase
+            .from('daily_records')
+            .delete()
+            .eq('retirement_id', retirementId)
+            .eq('record_date', normalizeDate(date));
+          if (keyErr && keyErr.code !== 'PGRST116') throw keyErr;
+        }
         break;
       }
 
@@ -570,6 +623,9 @@ class SyncService {
 
   // --- Pull Data from Cloud (Hydration & Bi-directional Sync) ---
   async pullFromCloud(): Promise<boolean> {
+    // Ensure any expired trash items are queued for cloud deletion before pulling
+    storage.runExpiredTrashCleanup();
+
     if (!isSupabaseConfigured) return false;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
 
@@ -583,6 +639,22 @@ class SyncService {
 
     try {
       const currentUserId = session.user.id;
+
+      // Track entities with pending deletions in the local queue so pullFromCloud never resurrects them
+      const pendingDeleteRetIds = new Set(
+        this.queue.filter((q) => q.type === 'DELETE_RETIREMENT').map((q) => q.entityId)
+      );
+      const pendingDeleteDailyIds = new Set(
+        this.queue.filter((q) => q.type === 'DELETE_DAILY_RECORD').map((q) => q.entityId)
+      );
+      const pendingDeleteDailyKeys = new Set(
+        this.queue
+          .filter((q) => q.type === 'DELETE_DAILY_RECORD' && q.payload?.retirementId && q.payload?.date)
+          .map((q) => `${q.payload.retirementId}::${normalizeDate(q.payload.date)}`)
+      );
+      const pendingDeleteSuppIds = new Set(
+        this.queue.filter((q) => q.type === 'DELETE_SUPPLEMENTARY').map((q) => q.entityId)
+      );
 
       // 1. Fetch accessible retirements: Owned OR in retirement_access
       const { data: ownedRetirements, error: ownedErr } = await supabase
@@ -611,7 +683,9 @@ class SyncService {
         }
       }
 
-      const allCloudRetirements = [...(ownedRetirements || []), ...sharedRetirements];
+      const allCloudRetirements = [...(ownedRetirements || []), ...sharedRetirements].filter(
+        (r) => !pendingDeleteRetIds.has(r.id)
+      );
       const allCloudIds = allCloudRetirements.map((r) => r.id);
 
       if (allCloudIds.length === 0) {
@@ -629,12 +703,18 @@ class SyncService {
         .select('retirement_id, connected_id');
 
       // 3. Fetch all daily records for accessible retirements
-      const { data: cloudDailyRecords } = await supabase
+      const { data: rawCloudDailyRecords } = await supabase
         .from('daily_records')
         .select('*')
         .in('retirement_id', allCloudIds);
 
-      const dailyRecordIds = (cloudDailyRecords || []).map((d) => d.id);
+      const cloudDailyRecords = (rawCloudDailyRecords || []).filter(
+        (d) =>
+          !pendingDeleteDailyIds.has(d.id) &&
+          !pendingDeleteDailyKeys.has(`${d.retirement_id}::${normalizeDate(d.record_date)}`)
+      );
+
+      const dailyRecordIds = cloudDailyRecords.map((d) => d.id);
 
       // 4. Fetch categories & expense items
       let cloudCategories: any[] = [];
@@ -658,10 +738,14 @@ class SyncService {
       }
 
       // 5. Fetch supplementary entries
-      const { data: cloudSupplementary } = await supabase
+      const { data: rawCloudSupplementary } = await supabase
         .from('supplementary_entries')
         .select('*')
         .in('retirement_id', allCloudIds);
+
+      const cloudSupplementary = (rawCloudSupplementary || []).filter(
+        (s) => !pendingDeleteSuppIds.has(s.id)
+      );
 
       // 6. Fetch profiles for owners
       const ownerIds = Array.from(new Set(allCloudRetirements.map((r) => r.owner_id)));
@@ -714,7 +798,7 @@ class SyncService {
       });
 
       // Assemble structured daily records
-      const assembledDailyRecords: DailyRecord[] = (cloudDailyRecords || []).map((dr) => {
+      const assembledDailyRecords: DailyRecord[] = cloudDailyRecords.map((dr) => {
         const recCategories = cloudCategories
           .filter((c) => c.daily_record_id === dr.id)
           .map((c) => {
@@ -749,7 +833,7 @@ class SyncService {
       });
 
       // Assemble supplementary entries
-      const assembledSupplementary: SupplementaryEntry[] = (cloudSupplementary || []).map((s) => ({
+      const assembledSupplementary: SupplementaryEntry[] = cloudSupplementary.map((s) => ({
         id: s.id,
         retirementId: s.retirement_id,
         description: s.description,
@@ -758,12 +842,48 @@ class SyncService {
         syncStatus: 'synced',
       }));
 
-      // Merge into local storage preserving locally pending changes
-      storage.mergeCloudData(hydratedRetirements, assembledDailyRecords, assembledSupplementary);
+      // Merge into local storage preserving locally pending changes and reconciling daily records
+      const { reconciledDailyRecords } = storage.mergeCloudData(
+        hydratedRetirements,
+        assembledDailyRecords,
+        assembledSupplementary
+      );
+
+      // Update any existing queue items whose local daily-record ID or payload was reconciled with cloud
+      if (reconciledDailyRecords.length > 0) {
+        let queueModified = false;
+        for (const { oldId, newId, record } of reconciledDailyRecords) {
+          let matchedExistingQueueItem = false;
+          const keptQueue: SyncQueueItem[] = [];
+
+          for (const qItem of this.queue) {
+            if (
+              qItem.type === 'UPSERT_DAILY_RECORD' &&
+              qItem.status === 'pending' &&
+              (qItem.entityId === oldId || qItem.entityId === newId)
+            ) {
+              if (!matchedExistingQueueItem) {
+                qItem.entityId = newId;
+                qItem.payload = record;
+                qItem.createdAt = new Date().toISOString();
+                keptQueue.push(qItem);
+                matchedExistingQueueItem = true;
+              }
+              queueModified = true;
+            } else {
+              keptQueue.push(qItem);
+            }
+          }
+          this.queue = keptQueue;
+        }
+        if (queueModified) {
+          this.saveQueue();
+        }
+      }
 
       const cloudRetIdSet = new Set(allCloudIds);
       const cloudDailyRecIdSet = new Set(dailyRecordIds);
-      const cloudSuppIdSet = new Set((cloudSupplementary || []).map((s) => s.id));
+      const cloudSuppIdSet = new Set(cloudSupplementary.map((s) => s.id));
 
       // Run local-to-cloud initial sync for any un-synced user-owned local records
       await this.runInitialMigration(session.user, cloudRetIdSet, cloudDailyRecIdSet, cloudSuppIdSet);
@@ -788,22 +908,12 @@ class SyncService {
     cloudDailyRecordIds?: Set<string>,
     cloudSupplementaryIds?: Set<string>
   ): Promise<void> {
-    const localRetirements = storage.getRetirements(true); // include trash
-
-    // Identify local retirements owned by current user (or created locally without ownerId), excluding demo
-    const eligibleRetirements = localRetirements.filter((r) => {
-      if (r.isDemo) return false;
-      // Do not upload another user's records
-      if (r.ownerId && r.ownerId !== user.id) return false;
-      return true;
-    });
+    // Positively reconcile legacy user-owned retirements in local storage without claiming other users' or reviewer records
+    const eligibleRetirements = storage.reconcileLegacyOwnedRetirements(user);
 
     for (const ret of eligibleRetirements) {
-      // Assign ownerId if missing locally
-      if (!ret.ownerId) {
-        ret.ownerId = user.id;
-        storage.saveRetirement(ret, true);
-      }
+      if (ret.isDemo) continue;
+      if (ret.ownerId !== user.id) continue;
 
       // If record is not known in cloud OR is marked pending, it needs upload
       const isKnownInCloud = cloudRetirementIds ? cloudRetirementIds.has(ret.id) : false;
