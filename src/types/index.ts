@@ -43,6 +43,7 @@ export interface DailyRecord {
   createdAt: string;
   updatedAt: string;
   baseUpdatedAt?: string; // Last synced cloud updatedAt timestamp
+  deletedItemIds?: string[]; // Item IDs deleted locally while record syncStatus is pending
   syncStatus: 'synced' | 'pending';
 }
 

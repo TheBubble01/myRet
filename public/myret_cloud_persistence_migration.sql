@@ -567,6 +567,7 @@ DECLARE
   v_item_amount NUMERIC(15, 2);
   v_item_desc TEXT;
   v_sort_idx INT := 0;
+  v_updated_at TIMESTAMPTZ := NOW();
 BEGIN
   IF v_user_id IS NULL THEN
     RAISE EXCEPTION 'Authentication required';
@@ -600,12 +601,12 @@ BEGIN
 
     UPDATE public.daily_records
     SET version = v_current_version,
-        updated_at = NOW()
+        updated_at = v_updated_at
     WHERE id = v_daily_record_id;
   ELSE
     v_daily_record_id := COALESCE(p_record_id, gen_random_uuid());
     INSERT INTO public.daily_records (id, retirement_id, record_date, daily_total, version, created_at, updated_at)
-    VALUES (v_daily_record_id, p_retirement_id, p_record_date, 0.00, 1, NOW(), NOW());
+    VALUES (v_daily_record_id, p_retirement_id, p_record_date, 0.00, 1, v_updated_at, v_updated_at);
   END IF;
 
   -- Clean replacement of child categories & items inside this atomic transaction
@@ -646,7 +647,7 @@ BEGIN
               v_item_desc,
               v_item_qty,
               v_item_rate,
-              NOW()
+              v_updated_at
             );
           END IF;
         END LOOP;
@@ -659,11 +660,12 @@ BEGIN
 
   UPDATE public.daily_records
   SET daily_total = v_calculated_daily_total,
-      updated_at = NOW()
-  WHERE id = v_daily_record_id;
+      updated_at = v_updated_at
+  WHERE id = v_daily_record_id
+  RETURNING updated_at INTO v_updated_at;
 
   UPDATE public.retirements
-  SET updated_at = NOW(),
+  SET updated_at = v_updated_at,
       version = version + 1
   WHERE id = p_retirement_id;
 
@@ -672,7 +674,8 @@ BEGIN
     'daily_record_id', v_daily_record_id,
     'record_date', p_record_date,
     'daily_total', v_calculated_daily_total,
-    'version', v_current_version
+    'version', v_current_version,
+    'updated_at', v_updated_at
   );
 END;
 $$;

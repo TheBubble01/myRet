@@ -51,6 +51,18 @@ export function normalizeDate(dateStr: string): string {
   return trimmed;
 }
 
+/**
+ * Compares two ISO timestamp strings for logical instant equality,
+ * handling differences in timezone representation (e.g. +00:00 vs Z).
+ */
+function areTimestampsEqual(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const parsedA = Date.parse(a);
+  const parsedB = Date.parse(b);
+  return !Number.isNaN(parsedA) && !Number.isNaN(parsedB) && parsedA === parsedB;
+}
+
 const STORAGE_KEYS = {
   CURRENT_USER: 'myret_current_user',
   ALL_USERS: 'myret_users_list',
@@ -649,7 +661,7 @@ class StorageService {
     if (sameDateIndex >= 0) {
       // An entry for this date already exists! Combine into that single Daily Retirement
       const targetRecord = rawRecords[sameDateIndex];
-      if (targetRecord.syncStatus === 'synced') {
+      if (targetRecord.syncStatus !== 'pending') {
         targetRecord.baseUpdatedAt = targetRecord.baseUpdatedAt || targetRecord.updatedAt;
       }
       this.mergeRecordCategories(targetRecord, record);
@@ -685,9 +697,36 @@ class StorageService {
         };
         record.id = generateUUID();
         delete record.baseUpdatedAt;
+        delete record.deletedItemIds;
       } else {
         record.baseUpdatedAt =
-          prev.syncStatus === 'synced' ? prev.baseUpdatedAt || prev.updatedAt : prev.baseUpdatedAt;
+          prev.syncStatus !== 'pending'
+            ? prev.baseUpdatedAt || prev.updatedAt
+            : prev.baseUpdatedAt || record.baseUpdatedAt;
+
+        // Track expense item IDs deleted locally so cloud reconciliation never restores them before sync
+        const currentItemIds = new Set<string>();
+        for (const cat of record.categories || []) {
+          for (const it of cat.items || []) {
+            if (it.id) currentItemIds.add(it.id);
+          }
+        }
+        const removedIds = new Set<string>(
+          prev.syncStatus === 'pending' ? prev.deletedItemIds || [] : []
+        );
+        for (const cat of prev.categories || []) {
+          for (const it of cat.items || []) {
+            if (it.id && !currentItemIds.has(it.id)) {
+              removedIds.add(it.id);
+            }
+          }
+        }
+        currentItemIds.forEach((id) => removedIds.delete(id));
+        if (removedIds.size > 0) {
+          record.deletedItemIds = Array.from(removedIds);
+        } else {
+          delete record.deletedItemIds;
+        }
       }
       rawRecords[existingByIdIndex] = record;
       this.setItem(STORAGE_KEYS.DAILY_RECORDS, rawRecords);
@@ -969,7 +1008,10 @@ class StorageService {
         records[index].id = authoritativeCloudId;
       }
       records[index].syncStatus = 'synced';
-      records[index].baseUpdatedAt = cloudUpdatedAt || records[index].updatedAt;
+      const effectiveUpdatedAt = cloudUpdatedAt || records[index].updatedAt;
+      records[index].updatedAt = effectiveUpdatedAt;
+      records[index].baseUpdatedAt = effectiveUpdatedAt;
+      delete records[index].deletedItemIds;
       this.setItem(STORAGE_KEYS.DAILY_RECORDS, records);
     }
   }
@@ -987,9 +1029,9 @@ class StorageService {
    * Reconciles a local DailyRecord and a cloud DailyRecord that share the same
    * canonical identity (retirementId, normalized calendar date).
    * - Adopts the authoritative cloud record ID (cloudRec.id).
-   * - Preserves local pending modifications without losing cloud-side expense items.
-   * - Deduplicates identical logical expenses.
-   * - Preserves both versions and reports a conflict when conflicting edits exist.
+   * - Preserves local pending modifications and item deletions without duplicating edits.
+   * - Deduplicates identical logical expenses across distinct-ID records.
+   * - Preserves legitimate expense items that share descriptions with different quantities/rates.
    */
   private reconcileDailyRecordWithCloud(
     localRec: DailyRecord,
@@ -1017,12 +1059,11 @@ class StorageService {
     }
 
     // 2. If local record is pending, shares the same ID, and cloud has not changed since baseUpdatedAt,
-    //    then localRec is a clean descendant of cloudRec (user's own offline edit/deletion).
+    //    then localRec is a clean descendant of cloudRec (user's own pending edit, addition, or deletion).
     if (
       localRec.syncStatus === 'pending' &&
       localRec.id === cloudRec.id &&
-      localRec.baseUpdatedAt &&
-      localRec.baseUpdatedAt === cloudRec.updatedAt
+      (!localRec.baseUpdatedAt || areTimestampsEqual(localRec.baseUpdatedAt, cloudRec.updatedAt))
     ) {
       return {
         record: {
@@ -1037,9 +1078,12 @@ class StorageService {
       };
     }
 
-    // 3. Divergent versions (different local vs. cloud IDs for the same date, or concurrent edits):
+    // 3. Divergent versions (different local vs. cloud IDs for the same date, or concurrent updates):
     //    Reconcile categories and expense items while adopting cloudRec.id.
     let needsCloudPush = localRec.syncStatus === 'pending' || localRec.id !== cloudRec.id;
+    const deletedItemIds = new Set<string>(
+      localRec.syncStatus === 'pending' ? localRec.deletedItemIds || [] : []
+    );
 
     const reconciledCategories = (localRec.categories || []).map((cat) => ({
       ...cat,
@@ -1063,13 +1107,25 @@ class StorageService {
 
     for (const cloudCat of cloudRec.categories || []) {
       const cCatName = (cloudCat.name || 'General').trim();
+      const rawCloudItems = cloudCat.items || [];
+      const survivingCloudItems = rawCloudItems.filter((it) => {
+        if (it.id && deletedItemIds.has(it.id)) {
+          needsCloudPush = true;
+          return false;
+        }
+        return true;
+      });
+
       const localCat = reconciledCategories.find(
         (c) => c.name.trim().toLowerCase() === cCatName.toLowerCase()
       );
 
       if (!localCat) {
-        // Cloud category does not exist locally -> preserve cloud category and its items
-        const clonedItems = (cloudCat.items || []).map((it) => {
+        if (survivingCloudItems.length === 0) {
+          continue;
+        }
+        // Cloud category does not exist locally -> preserve cloud category and its non-deleted items
+        const clonedItems = survivingCloudItems.map((it) => {
           const qty = Number(it.quantity) || 0;
           const rt = Number(it.rate) || 0;
           const amt = qty > 0 && rt > 0 ? calculateAmount(qty, rt) : Number(it.amount) || 0;
@@ -1090,49 +1146,46 @@ class StorageService {
         needsCloudPush = true;
       } else {
         // Category exists in both -> reconcile expense items
-        for (const cloudItem of cloudCat.items || []) {
+        const cloudCatItemIds = new Set<string>(
+          survivingCloudItems.map((it) => it.id).filter(Boolean)
+        );
+        const matchedLocalItemIds = new Set<string>();
+
+        for (const cloudItem of survivingCloudItems) {
           const cDesc = (cloudItem.description || '').trim();
           const cQty = Number(cloudItem.quantity) || 0;
           const cRate = Number(cloudItem.rate) || 0;
           const cAmt = cQty > 0 && cRate > 0 ? calculateAmount(cQty, cRate) : Number(cloudItem.amount) || 0;
 
-          // Match 1: Same item ID
+          // Match 1: Same item ID -> update or preserve in place without creating duplicate items
           const sameIdItem = localCat.items.find((i) => i.id === cloudItem.id);
           if (sameIdItem) {
+            matchedLocalItemIds.add(sameIdItem.id);
             const isIdentical =
               sameIdItem.description.trim().toLowerCase() === cDesc.toLowerCase() &&
               Number(sameIdItem.quantity) === cQty &&
               Number(sameIdItem.rate) === cRate;
 
             if (!isIdentical) {
-              // Conflicting edits on the same item ID: preserve both versions and report conflict
-              const conflictDesc = `${cDesc} (Cloud conflict copy)`;
-              const alreadyHasConflictCopy = localCat.items.some(
-                (i) =>
-                  i.description.trim().toLowerCase() === conflictDesc.toLowerCase() &&
-                  Number(i.quantity) === cQty &&
-                  Number(i.rate) === cRate
-              );
-              if (!alreadyHasConflictCopy) {
-                localCat.items.push({
-                  id: generateUUID(),
-                  description: conflictDesc,
-                  quantity: cQty,
-                  rate: cRate,
-                  amount: cAmt,
-                });
+              if (localRec.syncStatus === 'pending') {
+                // Keep the pending local edit in-place on sameIdItem and push to cloud
+                needsCloudPush = true;
+              } else {
+                // Local record is not pending; adopt authoritative cloud item values in-place
+                sameIdItem.description = cDesc;
+                sameIdItem.quantity = cQty;
+                sameIdItem.rate = cRate;
+                sameIdItem.amount = cAmt;
               }
-              conflictMessages.push(
-                `Conflicting edit on "${cDesc}" in category "${cCatName}" (${normDate}); both local and cloud versions were preserved.`
-              );
-              needsCloudPush = true;
             }
             continue;
           }
 
-          // Match 2: Identical logical expense (same normalized description, quantity, and rate)
+          // Match 2: Identical logical expense across distinct item IDs (same description, quantity, and rate)
           const sameLogicalItem = localCat.items.find(
             (i) =>
+              !matchedLocalItemIds.has(i.id) &&
+              !cloudCatItemIds.has(i.id) &&
               cDesc !== '' &&
               i.description.trim().toLowerCase() === cDesc.toLowerCase() &&
               Number(i.quantity) === cQty &&
@@ -1141,45 +1194,20 @@ class StorageService {
           if (sameLogicalItem) {
             // Reconcile item ID to cloud item ID and avoid duplicate expense
             sameLogicalItem.id = cloudItem.id || sameLogicalItem.id;
+            matchedLocalItemIds.add(sameLogicalItem.id);
             continue;
           }
 
-          // Match 3: Same normalized description in the same category, but different quantity or rate
-          const sameDescDifferentValues = localCat.items.find(
-            (i) => cDesc !== '' && i.description.trim().toLowerCase() === cDesc.toLowerCase()
-          );
-          if (sameDescDifferentValues) {
-            const conflictDesc = `${cDesc} (Cloud conflict copy)`;
-            const alreadyHasConflictCopy = localCat.items.some(
-              (i) =>
-                i.description.trim().toLowerCase() === conflictDesc.toLowerCase() &&
-                Number(i.quantity) === cQty &&
-                Number(i.rate) === cRate
-            );
-            if (!alreadyHasConflictCopy) {
-              localCat.items.push({
-                id: cloudItem.id || generateUUID(),
-                description: conflictDesc,
-                quantity: cQty,
-                rate: cRate,
-                amount: cAmt,
-              });
-            }
-            conflictMessages.push(
-              `Conflicting values for "${cDesc}" in category "${cCatName}" (${normDate}); both local and cloud versions were preserved.`
-            );
-            needsCloudPush = true;
-            continue;
-          }
-
-          // Match 4: Distinct cloud-side expense item not present locally -> preserve it
+          // Match 3: Distinct cloud-side expense item not present locally -> preserve it as a normal item
+          const newItemId = cloudItem.id || generateUUID();
           localCat.items.push({
-            id: cloudItem.id || generateUUID(),
+            id: newItemId,
             description: cDesc,
             quantity: cQty,
             rate: cRate,
             amount: cAmt,
           });
+          matchedLocalItemIds.add(newItemId);
           needsCloudPush = true;
         }
       }
@@ -1206,6 +1234,9 @@ class StorageService {
       createdAt: cloudRec.createdAt || localRec.createdAt,
       updatedAt: needsCloudPush ? new Date().toISOString() : cloudRec.updatedAt,
       baseUpdatedAt: cloudRec.updatedAt,
+      ...(needsCloudPush && deletedItemIds.size > 0
+        ? { deletedItemIds: Array.from(deletedItemIds) }
+        : {}),
       syncStatus: needsCloudPush ? 'pending' : 'synced',
     };
 

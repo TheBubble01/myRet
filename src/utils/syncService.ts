@@ -497,19 +497,24 @@ class SyncService {
           }
         }
 
-        // Reconcile any queued operations referencing the old daily record ID
-        if (authoritativeRecordId !== record.id) {
-          for (const qItem of this.queue) {
-            if (qItem.id !== item.id && qItem.entityId === record.id) {
-              qItem.entityId = authoritativeRecordId;
-              if (qItem.payload && typeof qItem.payload === 'object' && 'id' in qItem.payload) {
-                qItem.payload = { ...qItem.payload, id: authoritativeRecordId };
-              }
+        // Reconcile any queued operations referencing the old or authoritative daily record ID
+        for (const qItem of this.queue) {
+          if (
+            qItem.id !== item.id &&
+            (qItem.entityId === record.id || qItem.entityId === authoritativeRecordId)
+          ) {
+            qItem.entityId = authoritativeRecordId;
+            if (qItem.payload && typeof qItem.payload === 'object' && 'id' in qItem.payload) {
+              qItem.payload = {
+                ...qItem.payload,
+                id: authoritativeRecordId,
+                baseUpdatedAt: authoritativeUpdatedAt,
+              };
             }
           }
         }
 
-        // Mark local daily record synced ONLY upon complete success, updating to authoritative cloud ID
+        // Mark local daily record synced ONLY upon complete success, updating to authoritative cloud ID and updated_at
         storage.markDailyRecordSynced(record.id, authoritativeRecordId, authoritativeUpdatedAt);
         break;
       }
@@ -828,6 +833,7 @@ class SyncService {
           dailyTotal: Number(dr.daily_total) || 0,
           createdAt: dr.created_at,
           updatedAt: dr.updated_at,
+          baseUpdatedAt: dr.updated_at,
           syncStatus: 'synced',
         };
       });
