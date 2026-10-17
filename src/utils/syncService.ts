@@ -124,6 +124,27 @@ class SyncService {
 
     // Purge superseded pending upserts when an entity or parent retirement is deleted
     if (type === 'DELETE_RETIREMENT') {
+      const localRet = storage.getRetirementById(entityId);
+      const queuedHasSynced = this.queue.some(
+        (item) =>
+          (item.entityId === entityId || item.retirementId === entityId) &&
+          (item.payload?.hasSyncedToCloud === true ||
+            (item.type === 'UPSERT_RETIREMENT' &&
+              item.payload &&
+              storage.hasRetirementEverSynced(item.payload)))
+      );
+      const hasSyncedToCloud =
+        payload?.hasSyncedToCloud === true ||
+        queuedHasSynced ||
+        (localRet
+          ? storage.hasRetirementEverSynced(localRet)
+          : payload?.hasSyncedToCloud === false
+            ? false
+            : true);
+      payload = {
+        ...payload,
+        hasSyncedToCloud,
+      };
       this.purgeQueueForRetirement(entityId, true);
     } else if (type === 'DELETE_DAILY_RECORD') {
       this.queue = this.queue.filter(
@@ -137,13 +158,17 @@ class SyncService {
 
     // Coalesce updates to the same entity in pending queue
     const existingIndex = this.queue.findIndex(
-      (item) => item.entityId === entityId && item.type === type && item.status === 'pending'
+      (item) =>
+        item.entityId === entityId &&
+        item.type === type &&
+        (item.status === 'pending' || type === 'DELETE_RETIREMENT')
     );
 
     if (existingIndex >= 0) {
       this.queue[existingIndex] = {
         ...this.queue[existingIndex],
         payload,
+        status: 'pending',
         createdAt: new Date().toISOString(),
       };
     } else {
@@ -352,6 +377,7 @@ class SyncService {
         item.lastError = errMsg;
         item.status = item.retryCount >= 5 ? 'failed' : 'pending';
         failedItems.push(item);
+        this.saveQueue();
       }
     }
 
@@ -491,10 +517,32 @@ class SyncService {
           throw new Error('Cannot delete retirement: missing retirement ID in queue payload');
         }
 
-        const { error } = await supabase.from('retirements').delete().eq('id', id);
-        if (error && error.code !== 'PGRST116') {
+        const localRet = storage.getRetirementById(id);
+        const hasEverSynced =
+          item.payload?.hasSyncedToCloud === true ||
+          (localRet
+            ? storage.hasRetirementEverSynced(localRet)
+            : item.payload?.hasSyncedToCloud !== false);
+
+        const { data: deletedRows, error } = await supabase
+          .from('retirements')
+          .delete()
+          .eq('id', id)
+          .select('id');
+        if (error) {
           throw error;
         }
+
+        const deletedCount = Array.isArray(deletedRows) ? deletedRows.length : 0;
+        if (deletedCount === 0 && hasEverSynced) {
+          const isTombstoned = await this.isRetirementTombstonedInCloud(id);
+          if (!isTombstoned) {
+            throw new Error(
+              `Permanent deletion of retirement ${id} could not be confirmed in cloud (0 rows deleted and no deletion tombstone found).`
+            );
+          }
+        }
+
         this.purgeQueueForRetirement(id, true);
         break;
       }
