@@ -53,10 +53,24 @@ export default defineConfig(() => {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,ttf}'],
         },
         devOptions: {
-          enabled: process.env.DISABLE_HMR !== 'true',
-          type: 'module',
+          enabled: false,
         },
       }),
+      {
+        name: 'dev-pwa-manifest',
+        transformIndexHtml() {
+          return [
+            {
+              tag: 'link',
+              attrs: {
+                rel: 'manifest',
+                href: '/manifest.webmanifest',
+              },
+              injectTo: 'head',
+            },
+          ];
+        },
+      },
     ],
     resolve: {
       alias: {

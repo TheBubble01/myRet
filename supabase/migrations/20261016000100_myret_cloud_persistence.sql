@@ -127,6 +127,14 @@ CREATE TABLE IF NOT EXISTS public.connected_retirements (
   CHECK (retirement_id < connected_id)
 );
 
+-- 1.9 Deleted Retirements Tombstones (Durable cloud record preventing stale-device resurrection)
+CREATE TABLE IF NOT EXISTS public.deleted_retirements (
+  retirement_id UUID PRIMARY KEY,
+  code VARCHAR(12),
+  owner_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+  deleted_at TIMESTAMPTZ DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
 -- ============================================================================
 -- 2. INDEXES FOR QUERY OPTIMIZATION
 -- ============================================================================
@@ -140,12 +148,15 @@ CREATE INDEX IF NOT EXISTS idx_categories_record ON public.categories(daily_reco
 CREATE INDEX IF NOT EXISTS idx_expense_items_cat ON public.expense_items(category_id);
 CREATE INDEX IF NOT EXISTS idx_supplementary_ret ON public.supplementary_entries(retirement_id);
 CREATE INDEX IF NOT EXISTS idx_connected_ret_conn ON public.connected_retirements(connected_id);
+CREATE INDEX IF NOT EXISTS idx_deleted_retirements_owner ON public.deleted_retirements(owner_id);
 
 -- ============================================================================
 -- 3. SECURITY DEFINER HELPER FUNCTIONS
 -- ============================================================================
 
--- Helper 1: Checks if caller has active access (Owner OR Granted Reviewer)
+-- Helper 1: Checks if caller has retirement access
+-- - Primary owner retains access while status is 'active' or 'in_trash' (48-hour recovery window)
+-- - Collaborator reviewers strictly require status = 'active'
 CREATE OR REPLACE FUNCTION public.current_user_has_retirement_access(p_ret_id UUID)
 RETURNS BOOLEAN
 LANGUAGE sql
@@ -156,12 +167,14 @@ AS $$
   SELECT EXISTS (
     SELECT 1 FROM public.retirements
     WHERE id = p_ret_id
-      AND status = 'active'
       AND (
-        owner_id = auth.uid()
-        OR EXISTS (
-          SELECT 1 FROM public.retirement_access
-          WHERE retirement_id = p_ret_id AND user_id = auth.uid()
+        (owner_id = auth.uid() AND status IN ('active', 'in_trash'))
+        OR (
+          status = 'active'
+          AND EXISTS (
+            SELECT 1 FROM public.retirement_access
+            WHERE retirement_id = p_ret_id AND user_id = auth.uid()
+          )
         )
       )
   );
@@ -178,7 +191,7 @@ AS $$
   SELECT EXISTS (
     SELECT 1 FROM public.retirements
     WHERE id = p_ret_id
-      AND status = 'active'
+      AND status IN ('active', 'in_trash')
       AND owner_id = auth.uid()
   );
 $$;
@@ -201,6 +214,7 @@ ALTER TABLE public.categories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.expense_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.supplementary_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.connected_retirements ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.deleted_retirements ENABLE ROW LEVEL SECURITY;
 
 -- 4.1 Profiles Policies
 DROP POLICY IF EXISTS "Profiles viewable by self and collaborators" ON public.profiles;
@@ -386,8 +400,25 @@ CREATE POLICY "Connected retirements deletable by either owner"
     OR public.current_user_is_retirement_owner(connected_id)
   );
 
+-- 4.9 Deleted Retirements Tombstones Policies
+DROP POLICY IF EXISTS "Users can view deleted retirement tombstones" ON public.deleted_retirements;
+CREATE POLICY "Users can view deleted retirement tombstones"
+  ON public.deleted_retirements FOR SELECT TO authenticated
+  USING (true);
+
+DROP POLICY IF EXISTS "Owners can insert deleted retirement tombstones" ON public.deleted_retirements;
+CREATE POLICY "Owners can insert deleted retirement tombstones"
+  ON public.deleted_retirements FOR INSERT TO authenticated
+  WITH CHECK (owner_id = auth.uid());
+
+DROP POLICY IF EXISTS "Owners can update deleted retirement tombstones" ON public.deleted_retirements;
+CREATE POLICY "Owners can update deleted retirement tombstones"
+  ON public.deleted_retirements FOR UPDATE TO authenticated
+  USING (owner_id = auth.uid())
+  WITH CHECK (owner_id = auth.uid());
+
 -- ============================================================================
--- 5. AUTOMATED PROFILE CREATION TRIGGER
+-- 5. AUTOMATED PROFILE CREATION & DELETION TOMBSTONE TRIGGERS
 -- ============================================================================
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER
@@ -418,6 +449,51 @@ DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+-- Automatically record a durable tombstone whenever a retirement is permanently deleted
+CREATE OR REPLACE FUNCTION public.record_deleted_retirement_tombstone()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  INSERT INTO public.deleted_retirements (retirement_id, code, owner_id, deleted_at)
+  VALUES (OLD.id, OLD.code, OLD.owner_id, TIMEZONE('utc'::text, NOW()))
+  ON CONFLICT (retirement_id) DO UPDATE SET
+    deleted_at = EXCLUDED.deleted_at;
+  RETURN OLD;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS on_retirement_permanently_deleted ON public.retirements;
+CREATE TRIGGER on_retirement_permanently_deleted
+  AFTER DELETE ON public.retirements
+  FOR EACH ROW EXECUTE FUNCTION public.record_deleted_retirement_tombstone();
+
+-- Prevent any stale client from re-inserting or updating a permanently deleted retirement
+CREATE OR REPLACE FUNCTION public.prevent_deleted_retirement_resurrection()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.deleted_retirements
+    WHERE retirement_id = NEW.id
+  ) THEN
+    RAISE EXCEPTION 'PERMANENTLY_DELETED: Retirement % was permanently deleted and cannot be recreated', NEW.id
+      USING ERRCODE = 'P0002';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS before_retirement_upsert_check_deleted ON public.retirements;
+CREATE TRIGGER before_retirement_upsert_check_deleted
+  BEFORE INSERT OR UPDATE ON public.retirements
+  FOR EACH ROW EXECUTE FUNCTION public.prevent_deleted_retirement_resurrection();
 
 -- ============================================================================
 -- 6. RETIREMENT-CODE CLAIMING RPC (STRICTLY REVIEWER ACCESS)
@@ -686,7 +762,7 @@ GRANT EXECUTE ON FUNCTION public.upsert_daily_record_hierarchy(UUID, UUID, DATE,
 -- ============================================================================
 -- 9. LEAST-PRIVILEGE TABLE & ROUTINE GRANTS
 -- ============================================================================
--- Revoke all permissions from PUBLIC and anon exclusively on the 8 myRet tables
+-- Revoke all permissions from PUBLIC and anon exclusively on myRet tables
 REVOKE ALL ON TABLE public.profiles FROM PUBLIC, anon;
 REVOKE ALL ON TABLE public.retirements FROM PUBLIC, anon;
 REVOKE ALL ON TABLE public.retirement_access FROM PUBLIC, anon;
@@ -695,6 +771,7 @@ REVOKE ALL ON TABLE public.categories FROM PUBLIC, anon;
 REVOKE ALL ON TABLE public.expense_items FROM PUBLIC, anon;
 REVOKE ALL ON TABLE public.supplementary_entries FROM PUBLIC, anon;
 REVOKE ALL ON TABLE public.connected_retirements FROM PUBLIC, anon;
+REVOKE ALL ON TABLE public.deleted_retirements FROM PUBLIC, anon;
 
 GRANT SELECT, INSERT, UPDATE ON public.profiles TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.retirements TO authenticated;
@@ -704,4 +781,5 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.categories TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.expense_items TO authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.supplementary_entries TO authenticated;
 GRANT SELECT, INSERT, DELETE ON public.connected_retirements TO authenticated;
+GRANT SELECT, INSERT, UPDATE ON public.deleted_retirements TO authenticated;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO authenticated;

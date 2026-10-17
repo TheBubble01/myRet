@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Trash2, RotateCcw, AlertTriangle, ArrowLeft, Clock, ShieldAlert } from 'lucide-react';
 import { Retirement } from '../../types';
 import { storage, TRASH_RETENTION_MS } from '../../utils/storage';
+import { syncService } from '../../utils/syncService';
 
 interface TrashViewProps {
   onBack: () => void;
@@ -21,11 +22,20 @@ export const TrashView: React.FC<TrashViewProps> = ({
 
   useEffect(() => {
     loadTrash();
+    const unsubscribe = syncService.subscribe(() => {
+      loadTrash();
+    });
+    syncService.pullFromCloud().then(() => {
+      loadTrash();
+    });
+    return unsubscribe;
   }, []);
 
   const handleRestore = (id: string) => {
-    storage.restoreFromTrash(id);
-    onRetirementRestored(id);
+    const restored = storage.restoreFromTrash(id);
+    if (restored) {
+      onRetirementRestored(id);
+    }
     loadTrash();
   };
 

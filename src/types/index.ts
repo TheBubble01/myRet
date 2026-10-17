@@ -44,6 +44,7 @@ export interface DailyRecord {
   updatedAt: string;
   baseUpdatedAt?: string; // Last synced cloud updatedAt timestamp
   deletedItemIds?: string[]; // Item IDs deleted locally while record syncStatus is pending
+  hasSyncedToCloud?: boolean; // True once record has been synchronized with or hydrated from Supabase
   syncStatus: 'synced' | 'pending';
 }
 
@@ -53,6 +54,7 @@ export interface SupplementaryEntry {
   description: string;
   amount: number;
   createdAt: string;
+  hasSyncedToCloud?: boolean;
   syncStatus: 'synced' | 'pending';
 }
 
@@ -82,6 +84,7 @@ export interface Retirement {
   access: RetirementAccess[];
   connectedRetirementIds: string[];
   isDemo?: boolean;
+  hasSyncedToCloud?: boolean; // True once retirement has been synchronized with or hydrated from Supabase
   syncStatus: 'synced' | 'pending';
 }
 

@@ -68,6 +68,15 @@ export default function App() {
 
   const refreshRetirements = useCallback(() => {
     setRetirements(storage.getRetirements());
+    setActiveRetirement((prev) => {
+      if (!prev) return null;
+      const latest = storage.getRetirementById(prev.id);
+      if (!latest || latest.status === 'in_trash') {
+        setView((v) => (v === 'retirement_home' ? 'dashboard' : v));
+        return null;
+      }
+      return latest;
+    });
   }, []);
 
   // Subscribe to syncService updates for live UI refresh

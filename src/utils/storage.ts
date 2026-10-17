@@ -299,6 +299,9 @@ class StorageService {
       if (matchedViaOwnerAccess || matchedViaLegacyProfile || matchedSingleUserUnownedLegacy) {
         r.ownerId = user.id;
         r.syncStatus = 'pending';
+        if (r.hasSyncedToCloud === undefined) {
+          r.hasSyncedToCloud = false;
+        }
         if (ownerAccess) {
           ownerAccess.userId = user.id;
           if (user.email && !ownerAccess.userEmail) {
@@ -355,20 +358,36 @@ class StorageService {
   saveRetirement(retirement: Retirement, skipSync: boolean = false): void {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const index = all.findIndex((r) => r.id === retirement.id);
-    
+
+    let hasSynced = Boolean(retirement.hasSyncedToCloud);
+    if (index >= 0) {
+      hasSynced = this.hasRetirementEverSynced(all[index]) || hasSynced;
+    } else if (!retirement.isDemo) {
+      hasSynced = skipSync && retirement.syncStatus === 'synced' ? true : Boolean(retirement.hasSyncedToCloud);
+    }
+
     if (!retirement.isDemo && !skipSync) {
       retirement.syncStatus = 'pending';
     }
+    if (!retirement.isDemo) {
+      retirement.hasSyncedToCloud = hasSynced;
+    }
 
+    let savedRetirement = retirement;
     if (index >= 0) {
-      all[index] = { ...retirement, updatedAt: new Date().toISOString() };
+      savedRetirement = {
+        ...retirement,
+        hasSyncedToCloud: retirement.isDemo ? undefined : hasSynced,
+        updatedAt: new Date().toISOString(),
+      };
+      all[index] = savedRetirement;
     } else {
-      all.unshift(retirement);
+      all.unshift(savedRetirement);
     }
     this.setItem(STORAGE_KEYS.RETIREMENTS, all);
 
-    if (!skipSync && !retirement.isDemo && globalSyncTrigger) {
-      globalSyncTrigger('UPSERT_RETIREMENT', retirement.id, retirement);
+    if (!skipSync && !savedRetirement.isDemo && globalSyncTrigger) {
+      globalSyncTrigger('UPSERT_RETIREMENT', savedRetirement.id, savedRetirement);
     }
   }
 
@@ -376,10 +395,14 @@ class StorageService {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const index = all.findIndex((r) => r.id === id);
     if (index >= 0) {
+      const hasSynced = this.hasRetirementEverSynced(all[index]);
       all[index].status = 'in_trash';
       all[index].deletedAt = new Date().toISOString();
-      if (!all[index].isDemo && !skipSync) {
-        all[index].syncStatus = 'pending';
+      if (!all[index].isDemo) {
+        all[index].hasSyncedToCloud = hasSynced;
+        if (!skipSync) {
+          all[index].syncStatus = 'pending';
+        }
       }
       this.setItem(STORAGE_KEYS.RETIREMENTS, all);
       this.logActivity(id, 'Moved to Trash', 'Retirement moved to trash (48-hour recovery window)');
@@ -396,10 +419,14 @@ class StorageService {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const index = all.findIndex((r) => r.id === id);
     if (index >= 0) {
+      const hasSynced = this.hasRetirementEverSynced(all[index]);
       all[index].status = 'active';
       delete all[index].deletedAt;
-      if (!all[index].isDemo && !skipSync) {
-        all[index].syncStatus = 'pending';
+      if (!all[index].isDemo) {
+        all[index].hasSyncedToCloud = hasSynced;
+        if (!skipSync) {
+          all[index].syncStatus = 'pending';
+        }
       }
       this.setItem(STORAGE_KEYS.RETIREMENTS, all);
       this.logActivity(id, 'Restored from Trash', 'Retirement restored back to active state');
@@ -421,10 +448,24 @@ class StorageService {
       if (!globalSyncTrigger) {
         return false;
       }
-      globalSyncTrigger('DELETE_RETIREMENT', id, { id }, id);
+      globalSyncTrigger(
+        'DELETE_RETIREMENT',
+        id,
+        { id, code: target.code, ownerId: target.ownerId },
+        id
+      );
     }
 
-    const filtered = all.filter((r) => r.id !== id);
+    const filtered = all
+      .filter((r) => r.id !== id)
+      .map((r) =>
+        Array.isArray(r.connectedRetirementIds) && r.connectedRetirementIds.includes(id)
+          ? {
+              ...r,
+              connectedRetirementIds: r.connectedRetirementIds.filter((cid) => cid !== id),
+            }
+          : r
+      );
     this.setItem(STORAGE_KEYS.RETIREMENTS, filtered);
 
     // Also delete associated daily records and supplementary
@@ -469,7 +510,12 @@ class StorageService {
           }
           // Do not remove non-demo expired items until globalSyncTrigger is available to record DELETE_RETIREMENT
           if (globalSyncTrigger) {
-            globalSyncTrigger('DELETE_RETIREMENT', r.id, { id: r.id }, r.id);
+            globalSyncTrigger(
+              'DELETE_RETIREMENT',
+              r.id,
+              { id: r.id, code: r.code, ownerId: r.ownerId },
+              r.id
+            );
             expiredToRemove.push(r);
             continue;
           }
@@ -479,10 +525,18 @@ class StorageService {
     }
 
     if (expiredToRemove.length > 0) {
-      this.setItem(STORAGE_KEYS.RETIREMENTS, surviving);
+      const expiredIds = new Set(expiredToRemove.map((e) => e.id));
+      const cleanedSurviving = surviving.map((r) =>
+        Array.isArray(r.connectedRetirementIds) && r.connectedRetirementIds.some((cid) => expiredIds.has(cid))
+          ? {
+              ...r,
+              connectedRetirementIds: r.connectedRetirementIds.filter((cid) => !expiredIds.has(cid)),
+            }
+          : r
+      );
+      this.setItem(STORAGE_KEYS.RETIREMENTS, cleanedSurviving);
 
       // Clean up child daily records, supplementary entries, and activity logs for expired items
-      const expiredIds = new Set(expiredToRemove.map((e) => e.id));
       const records = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
       this.setItem(
         STORAGE_KEYS.DAILY_RECORDS,
@@ -661,10 +715,12 @@ class StorageService {
     if (sameDateIndex >= 0) {
       // An entry for this date already exists! Combine into that single Daily Retirement
       const targetRecord = rawRecords[sameDateIndex];
+      const hasSynced = this.hasDailyRecordEverSynced(targetRecord) || Boolean(record.hasSyncedToCloud);
       if (targetRecord.syncStatus !== 'pending') {
         targetRecord.baseUpdatedAt = targetRecord.baseUpdatedAt || targetRecord.updatedAt;
       }
       this.mergeRecordCategories(targetRecord, record);
+      targetRecord.hasSyncedToCloud = hasSynced;
       if (!skipSync) {
         targetRecord.syncStatus = 'pending';
       }
@@ -696,9 +752,11 @@ class StorageService {
           date: prevDate,
         };
         record.id = generateUUID();
+        record.hasSyncedToCloud = false;
         delete record.baseUpdatedAt;
         delete record.deletedItemIds;
       } else {
+        record.hasSyncedToCloud = this.hasDailyRecordEverSynced(prev) || Boolean(record.hasSyncedToCloud);
         record.baseUpdatedAt =
           prev.syncStatus !== 'pending'
             ? prev.baseUpdatedAt || prev.updatedAt
@@ -732,6 +790,9 @@ class StorageService {
       this.setItem(STORAGE_KEYS.DAILY_RECORDS, rawRecords);
     } else {
       // Brand new calendar date entry
+      if (record.hasSyncedToCloud === undefined) {
+        record.hasSyncedToCloud = skipSync && record.syncStatus === 'synced' ? true : false;
+      }
       rawRecords.push(record);
       this.setItem(STORAGE_KEYS.DAILY_RECORDS, rawRecords);
     }
@@ -787,10 +848,16 @@ class StorageService {
 
   saveSupplementaryEntry(entry: SupplementaryEntry, skipSync: boolean = false): void {
     const entries = this.getItem<SupplementaryEntry[]>(STORAGE_KEYS.SUPPLEMENTARY, []);
+    const index = entries.findIndex((e) => e.id === entry.id);
+    if (index >= 0) {
+      entry.hasSyncedToCloud =
+        this.hasSupplementaryEverSynced(entries[index]) || Boolean(entry.hasSyncedToCloud);
+    } else if (entry.hasSyncedToCloud === undefined) {
+      entry.hasSyncedToCloud = skipSync && entry.syncStatus === 'synced' ? true : false;
+    }
     if (!skipSync) {
       entry.syncStatus = 'pending';
     }
-    const index = entries.findIndex((e) => e.id === entry.id);
     if (index >= 0) {
       entries[index] = entry;
     } else {
@@ -989,11 +1056,58 @@ class StorageService {
   }
 
   // --- Cloud Sync State & Data Merging ---
+  hasRetirementEverSynced(ret: Retirement): boolean {
+    if (ret.hasSyncedToCloud === true || ret.syncStatus === 'synced') {
+      return true;
+    }
+    if (ret.hasSyncedToCloud === false) {
+      return false;
+    }
+    // For pre-existing local records created before hasSyncedToCloud was introduced:
+    // 1. Cloud-hydrated retirements only store REVIEWER rows in access (no OWNER row in access)
+    const accessList = Array.isArray(ret.access) ? ret.access : [];
+    const hasLocalOwnerAccessRow = accessList.some((a) => a.role === 'OWNER');
+    if (!hasLocalOwnerAccessRow) {
+      return true;
+    }
+    // 2. Or any child daily record / supplementary entry was already synced with the cloud
+    const records = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
+    if (
+      records.some(
+        (r) =>
+          r.retirementId === ret.id &&
+          (r.syncStatus === 'synced' || Boolean(r.baseUpdatedAt) || r.hasSyncedToCloud)
+      )
+    ) {
+      return true;
+    }
+    const supp = this.getItem<SupplementaryEntry[]>(STORAGE_KEYS.SUPPLEMENTARY, []);
+    if (supp.some((s) => s.retirementId === ret.id && (s.syncStatus === 'synced' || s.hasSyncedToCloud))) {
+      return true;
+    }
+    return false;
+  }
+
+  hasDailyRecordEverSynced(rec: DailyRecord): boolean {
+    if (rec.hasSyncedToCloud === true || rec.syncStatus === 'synced' || Boolean(rec.baseUpdatedAt)) {
+      return true;
+    }
+    return false;
+  }
+
+  hasSupplementaryEverSynced(supp: SupplementaryEntry): boolean {
+    if (supp.hasSyncedToCloud === true || supp.syncStatus === 'synced') {
+      return true;
+    }
+    return false;
+  }
+
   markRetirementSynced(id: string): void {
     const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
     const index = all.findIndex((r) => r.id === id);
     if (index >= 0) {
       all[index].syncStatus = 'synced';
+      all[index].hasSyncedToCloud = true;
       this.setItem(STORAGE_KEYS.RETIREMENTS, all);
     }
   }
@@ -1008,6 +1122,7 @@ class StorageService {
         records[index].id = authoritativeCloudId;
       }
       records[index].syncStatus = 'synced';
+      records[index].hasSyncedToCloud = true;
       const effectiveUpdatedAt = cloudUpdatedAt || records[index].updatedAt;
       records[index].updatedAt = effectiveUpdatedAt;
       records[index].baseUpdatedAt = effectiveUpdatedAt;
@@ -1021,6 +1136,7 @@ class StorageService {
     const index = entries.findIndex((e) => e.id === id);
     if (index >= 0) {
       entries[index].syncStatus = 'synced';
+      entries[index].hasSyncedToCloud = true;
       this.setItem(STORAGE_KEYS.SUPPLEMENTARY, entries);
     }
   }
@@ -1051,6 +1167,7 @@ class StorageService {
           ...cloudRec,
           date: normDate,
           baseUpdatedAt: cloudRec.updatedAt,
+          hasSyncedToCloud: true,
           syncStatus: 'synced',
         },
         needsCloudPush: false,
@@ -1071,6 +1188,7 @@ class StorageService {
           id: cloudRec.id,
           date: normDate,
           baseUpdatedAt: cloudRec.updatedAt,
+          hasSyncedToCloud: true,
           syncStatus: 'pending',
         },
         needsCloudPush: true,
@@ -1234,6 +1352,7 @@ class StorageService {
       createdAt: cloudRec.createdAt || localRec.createdAt,
       updatedAt: needsCloudPush ? new Date().toISOString() : cloudRec.updatedAt,
       baseUpdatedAt: cloudRec.updatedAt,
+      hasSyncedToCloud: true,
       ...(needsCloudPush && deletedItemIds.size > 0
         ? { deletedItemIds: Array.from(deletedItemIds) }
         : {}),
@@ -1250,13 +1369,16 @@ class StorageService {
   mergeCloudData(
     cloudRetirements: Retirement[],
     cloudDailyRecords: DailyRecord[],
-    cloudSupplementary: SupplementaryEntry[]
+    cloudSupplementary: SupplementaryEntry[],
+    deletedRetirementIds?: Set<string>
   ): {
     reconciledDailyRecords: { oldId: string; newId: string; record: DailyRecord }[];
     conflicts: string[];
+    prunedRetirementIds: string[];
   } {
     const reconciledDailyRecords: { oldId: string; newId: string; record: DailyRecord }[] = [];
     const conflicts: string[] = [];
+    const prunedRetirementIdSet = new Set<string>(deletedRetirementIds ? Array.from(deletedRetirementIds) : []);
 
     // 1. Merge Retirements
     const localRetirements = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
@@ -1268,12 +1390,17 @@ class StorageService {
     // Build map of non-demo local
     const localMap = new Map<string, Retirement>(nonDemoLocal.map((r) => [r.id, r]));
 
-    for (const cloudRet of cloudRetirements) {
+    for (const rawCloudRet of cloudRetirements) {
+      if (prunedRetirementIdSet.has(rawCloudRet.id)) {
+        localMap.delete(rawCloudRet.id);
+        continue;
+      }
+      const cloudRet: Retirement = { ...rawCloudRet, hasSyncedToCloud: true };
       const existingLocal = localMap.get(cloudRet.id);
       if (existingLocal) {
-        // If locally modified & pending sync, preserve local changes!
+        // If locally modified & pending sync, preserve local changes while marking hasSyncedToCloud
         if (existingLocal.syncStatus === 'pending') {
-          mergedRetirements.push(existingLocal);
+          mergedRetirements.push({ ...existingLocal, hasSyncedToCloud: true });
         } else {
           // Cloud takes precedence if newer or synced
           mergedRetirements.push(cloudRet);
@@ -1285,19 +1412,63 @@ class StorageService {
       }
     }
 
-    // Keep any remaining local retirements (e.g. created offline)
+    // Evaluate remaining local retirements absent from cloudRetirements:
+    // - If tombstoned in cloud OR previously synchronized with cloud, it was permanently deleted (or access revoked) -> prune it!
+    // - Keep ONLY genuinely unsynced local creations (created offline / pre-cloud legacy pending initial upload).
     localMap.forEach((local) => {
-      mergedRetirements.push(local);
+      if (prunedRetirementIdSet.has(local.id) || this.hasRetirementEverSynced(local)) {
+        prunedRetirementIdSet.add(local.id);
+      } else {
+        mergedRetirements.push(local);
+      }
     });
 
-    this.setItem(STORAGE_KEYS.RETIREMENTS, mergedRetirements);
+    // Remove any pruned retirement IDs from surviving retirements' connectedRetirementIds
+    const cleanedMergedRetirements = mergedRetirements.map((r) =>
+      Array.isArray(r.connectedRetirementIds) &&
+      r.connectedRetirementIds.some((cid) => prunedRetirementIdSet.has(cid))
+        ? {
+            ...r,
+            connectedRetirementIds: r.connectedRetirementIds.filter(
+              (cid) => !prunedRetirementIdSet.has(cid)
+            ),
+          }
+        : r
+    );
+
+    this.setItem(STORAGE_KEYS.RETIREMENTS, cleanedMergedRetirements);
+
+    const survivingRetirementIds = new Set<string>(cleanedMergedRetirements.map((r) => r.id));
+    const cloudRetirementIdSet = new Set<string>(cloudRetirements.map((r) => r.id));
+    // Track retirements that are currently in Trash (either in cloud or local) so child records are preserved
+    // during the 48-hour recovery window even if legacy RLS restricted fetching child rows for in_trash retirements
+    const trashedRetirementIds = new Set<string>();
+    for (const r of cloudRetirements) {
+      if (r.status === 'in_trash') trashedRetirementIds.add(r.id);
+    }
+    for (const r of cleanedMergedRetirements) {
+      if (r.status === 'in_trash') trashedRetirementIds.add(r.id);
+    }
+
+    // Clean up activity logs for pruned retirements
+    if (prunedRetirementIdSet.size > 0) {
+      const logs = this.getItem<ActivityLog[]>(STORAGE_KEYS.ACTIVITY_LOGS, []);
+      this.setItem(
+        STORAGE_KEYS.ACTIVITY_LOGS,
+        logs.filter((l) => !prunedRetirementIdSet.has(l.retirementId))
+      );
+    }
 
     // 2. Merge Daily Records (Enforcing 1 record per retirement per calendar date)
     const rawLocalRecords = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
 
     // First consolidate rawLocalRecords by canonical key `${retirementId}::${normalizeDate(date)}`
+    // excluding records belonging to pruned or non-existent retirements
     const consolidatedLocalByKey = new Map<string, DailyRecord>();
     for (const r of rawLocalRecords) {
+      if (prunedRetirementIdSet.has(r.retirementId) || !survivingRetirementIds.has(r.retirementId)) {
+        continue;
+      }
       const normDate = normalizeDate(r.date);
       const key = `${r.retirementId}::${normDate}`;
       const normalizedRec: DailyRecord = { ...r, date: normDate };
@@ -1306,7 +1477,10 @@ class StorageService {
       } else {
         const target = consolidatedLocalByKey.get(key)!;
         const wasPending = target.syncStatus === 'pending' || normalizedRec.syncStatus === 'pending';
+        const hadSynced =
+          this.hasDailyRecordEverSynced(target) || this.hasDailyRecordEverSynced(normalizedRec);
         this.mergeRecordCategories(target, normalizedRec);
+        target.hasSyncedToCloud = hadSynced;
         if (wasPending) {
           target.syncStatus = 'pending';
         }
@@ -1324,11 +1498,18 @@ class StorageService {
     const processedKeys = new Set<string>();
 
     for (const rawCloudRec of cloudDailyRecords) {
+      if (
+        prunedRetirementIdSet.has(rawCloudRec.retirementId) ||
+        !survivingRetirementIds.has(rawCloudRec.retirementId)
+      ) {
+        continue;
+      }
       const normCloudDate = normalizeDate(rawCloudRec.date);
       const cloudRec: DailyRecord = {
         ...rawCloudRec,
         date: normCloudDate,
         baseUpdatedAt: rawCloudRec.updatedAt,
+        hasSyncedToCloud: true,
       };
       const key = `${cloudRec.retirementId}::${normCloudDate}`;
       if (processedKeys.has(key)) continue;
@@ -1372,12 +1553,22 @@ class StorageService {
       }
     }
 
-    // Keep any remaining local daily records that were created locally/offline for other dates
+    // Evaluate remaining local daily records absent from cloudDailyRecords:
+    // - Preserve if parent retirement is in Trash (48-hour recovery safeguard)
+    // - If parent retirement is active in cloud and this daily record was already synced, prune it (deleted in cloud)
+    // - Otherwise (unsynced local creation), keep it
     for (const local of localRecords) {
       const key = `${local.retirementId}::${normalizeDate(local.date)}`;
       if (!processedLocalIds.has(local.id) && !processedKeys.has(key)) {
         processedLocalIds.add(local.id);
         processedKeys.add(key);
+
+        const isParentInTrash = trashedRetirementIds.has(local.retirementId);
+        const isParentInCloud = cloudRetirementIdSet.has(local.retirementId);
+        if (isParentInCloud && !isParentInTrash && this.hasDailyRecordEverSynced(local) && local.syncStatus === 'synced') {
+          // Previously synced daily record absent from active cloud retirement -> deleted in cloud
+          continue;
+        }
         mergedRecords.push(local);
       }
     }
@@ -1385,15 +1576,24 @@ class StorageService {
     this.setItem(STORAGE_KEYS.DAILY_RECORDS, mergedRecords);
 
     // 3. Merge Supplementary Entries
-    const localSupp = this.getItem<SupplementaryEntry[]>(STORAGE_KEYS.SUPPLEMENTARY, []);
+    const localSupp = this.getItem<SupplementaryEntry[]>(STORAGE_KEYS.SUPPLEMENTARY, []).filter(
+      (s) => !prunedRetirementIdSet.has(s.retirementId) && survivingRetirementIds.has(s.retirementId)
+    );
     const mergedSupp: SupplementaryEntry[] = [];
     const localSuppMap = new Map<string, SupplementaryEntry>(localSupp.map((s) => [s.id, s]));
 
-    for (const cloudS of cloudSupplementary) {
+    for (const rawCloudS of cloudSupplementary) {
+      if (
+        prunedRetirementIdSet.has(rawCloudS.retirementId) ||
+        !survivingRetirementIds.has(rawCloudS.retirementId)
+      ) {
+        continue;
+      }
+      const cloudS: SupplementaryEntry = { ...rawCloudS, hasSyncedToCloud: true };
       const existing = localSuppMap.get(cloudS.id);
       if (existing) {
         if (existing.syncStatus === 'pending') {
-          mergedSupp.push(existing);
+          mergedSupp.push({ ...existing, hasSyncedToCloud: true });
         } else {
           mergedSupp.push(cloudS);
         }
@@ -1404,12 +1604,22 @@ class StorageService {
     }
 
     localSuppMap.forEach((local) => {
+      const isParentInTrash = trashedRetirementIds.has(local.retirementId);
+      const isParentInCloud = cloudRetirementIdSet.has(local.retirementId);
+      if (isParentInCloud && !isParentInTrash && this.hasSupplementaryEverSynced(local) && local.syncStatus === 'synced') {
+        // Previously synced supplementary entry absent from active cloud retirement -> deleted in cloud
+        return;
+      }
       mergedSupp.push(local);
     });
 
     this.setItem(STORAGE_KEYS.SUPPLEMENTARY, mergedSupp);
 
-    return { reconciledDailyRecords, conflicts };
+    return {
+      reconciledDailyRecords,
+      conflicts,
+      prunedRetirementIds: Array.from(prunedRetirementIdSet),
+    };
   }
 }
 
