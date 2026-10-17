@@ -486,20 +486,9 @@ class SyncService {
       }
 
       case 'DELETE_RETIREMENT': {
-        const { id, code, ownerId } = item.payload || {};
-        // Best-effort record cloud tombstone in deleted_retirements (in addition to DB AFTER DELETE trigger)
-        try {
-          await supabase.from('deleted_retirements').upsert(
-            {
-              retirement_id: id,
-              code: code || null,
-              owner_id: ownerId || currentUserId,
-              deleted_at: new Date().toISOString(),
-            },
-            { onConflict: 'retirement_id' }
-          );
-        } catch {
-          // Ignore if deleted_retirements table is not yet deployed
+        const { id } = item.payload || {};
+        if (!id) {
+          throw new Error('Cannot delete retirement: missing retirement ID in queue payload');
         }
 
         const { error } = await supabase.from('retirements').delete().eq('id', id);

@@ -21,24 +21,17 @@ CREATE INDEX IF NOT EXISTS idx_deleted_retirements_owner ON public.deleted_retir
 
 ALTER TABLE public.deleted_retirements ENABLE ROW LEVEL SECURITY;
 
+-- Remove any direct client write policies; tombstones are created exclusively by the AFTER DELETE trigger
+DROP POLICY IF EXISTS "Owners can insert deleted retirement tombstones" ON public.deleted_retirements;
+DROP POLICY IF EXISTS "Owners can update deleted retirement tombstones" ON public.deleted_retirements;
+
 DROP POLICY IF EXISTS "Users can view deleted retirement tombstones" ON public.deleted_retirements;
 CREATE POLICY "Users can view deleted retirement tombstones"
   ON public.deleted_retirements FOR SELECT TO authenticated
   USING (true);
 
-DROP POLICY IF EXISTS "Owners can insert deleted retirement tombstones" ON public.deleted_retirements;
-CREATE POLICY "Owners can insert deleted retirement tombstones"
-  ON public.deleted_retirements FOR INSERT TO authenticated
-  WITH CHECK (owner_id = auth.uid());
-
-DROP POLICY IF EXISTS "Owners can update deleted retirement tombstones" ON public.deleted_retirements;
-CREATE POLICY "Owners can update deleted retirement tombstones"
-  ON public.deleted_retirements FOR UPDATE TO authenticated
-  USING (owner_id = auth.uid())
-  WITH CHECK (owner_id = auth.uid());
-
-REVOKE ALL ON TABLE public.deleted_retirements FROM PUBLIC, anon;
-GRANT SELECT, INSERT, UPDATE ON public.deleted_retirements TO authenticated;
+REVOKE ALL ON TABLE public.deleted_retirements FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON TABLE public.deleted_retirements TO authenticated;
 
 -- 2. Triggers to Record Tombstones & Reject Resurrection by Stale Clients
 CREATE OR REPLACE FUNCTION public.record_deleted_retirement_tombstone()

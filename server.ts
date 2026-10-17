@@ -10,9 +10,7 @@ import { createClient, User } from '@supabase/supabase-js';
 dotenv.config();
 
 // Ensure HMR is disabled in AI Studio environment to prevent WebSocket closed errors
-if (process.env.DISABLE_HMR === undefined) {
-  process.env.DISABLE_HMR = 'true';
-}
+process.env.DISABLE_HMR = 'true';
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -310,7 +308,7 @@ async function startServer() {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR !== 'true' ? { server: httpServer } : false,
+        hmr: false,
       },
       appType: 'spa',
     });
