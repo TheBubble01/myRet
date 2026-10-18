@@ -35,32 +35,66 @@
 html.light,
 html[data-theme="light"] {
   color-scheme: light;
-  --color-slate-950: #f8fafc;
+
+  /* Structural surfaces & high-contrast slate typography hierarchy */
+  --color-slate-950: #f1f5f9;
   --color-slate-900: #ffffff;
-  --color-slate-800: #f1f5f9;
-  --color-slate-700: #e2e8f0;
+  --color-slate-850: #e2e8f0;
+  --color-slate-800: #e2e8f0;
+  --color-slate-700: #cbd5e1;
   --color-slate-600: #64748b;
   --color-slate-500: #475569;
   --color-slate-400: #334155;
   --color-slate-300: #1e293b;
   --color-slate-200: #0f172a;
   --color-slate-100: #020617;
-  --color-white: #090d16;
+  --color-white: #0f172a;
   --color-black: #000000;
 
-  /* Semantic badges/alerts for light mode: softer backgrounds with rich text */
-  --color-red-950: #fef2f2;
-  --color-red-800: #fecaca;
-  --color-red-200: #991b1b;
-  --color-emerald-950: #f0fdf4;
-  --color-emerald-800: #bbf7d0;
-  --color-emerald-200: #166534;
+  /* Semantic badges, accents & alerts for light mode: crisp borders and rich, high-contrast text */
   --color-amber-950: #fffbeb;
-  --color-amber-800: #fde68a;
+  --color-amber-900: #fef3c7;
+  --color-amber-800: #fcd34d;
+  --color-amber-700: #f59e0b;
+  --color-amber-400: #b45309;
+  --color-amber-300: #92400e;
+  --color-amber-200: #78350f;
+
+  --color-emerald-950: #ecfdf5;
+  --color-emerald-900: #d1fae5;
+  --color-emerald-800: #6ee7b7;
+  --color-emerald-400: #047857;
+  --color-emerald-300: #065f46;
+  --color-emerald-200: #065f46;
+
+  --color-red-950: #fef2f2;
+  --color-red-900: #fee2e2;
+  --color-red-800: #fca5a5;
+  --color-red-400: #dc2626;
+  --color-red-300: #b91c1c;
+  --color-red-200: #991b1b;
+  --color-red-100: #7f1d1d;
+
   --color-blue-950: #eff6ff;
-  --color-blue-800: #bfdbfe;
+  --color-blue-900: #dbeafe;
+  --color-blue-800: #93c5fd;
+  --color-blue-400: #1d4ed8;
+  --color-blue-300: #1e40af;
+  --color-blue-200: #1e3a8a;
+
+  --color-indigo-950: #eef2ff;
+  --color-indigo-900: #e0e7ff;
+  --color-indigo-800: #a5b4fc;
+  --color-indigo-400: #4338ca;
+  --color-indigo-300: #3730a3;
+  --color-indigo-200: #312e81;
+
   --color-purple-950: #faf5ff;
-  --color-purple-800: #e9d5ff;
+  --color-purple-900: #f3e8ff;
+  --color-purple-800: #d8b4fe;
+  --color-purple-400: #7e22ce;
+  --color-purple-300: #6b21a8;
+  --color-purple-200: #581c87;
 }
 
 /* Automatic system media query fallback (if script hasn't run yet) */
@@ -68,31 +102,180 @@ html[data-theme="light"] {
   :root:not([data-theme="dark"]):not(.dark),
   html:not([data-theme="dark"]):not(.dark) {
     color-scheme: light;
-    --color-slate-950: #f8fafc;
+    --color-slate-950: #f1f5f9;
     --color-slate-900: #ffffff;
-    --color-slate-800: #f1f5f9;
-    --color-slate-700: #e2e8f0;
+    --color-slate-850: #e2e8f0;
+    --color-slate-800: #e2e8f0;
+    --color-slate-700: #cbd5e1;
     --color-slate-600: #64748b;
     --color-slate-500: #475569;
     --color-slate-400: #334155;
     --color-slate-300: #1e293b;
     --color-slate-200: #0f172a;
     --color-slate-100: #020617;
-    --color-white: #090d16;
+    --color-white: #0f172a;
     --color-black: #000000;
 
-    --color-red-950: #fef2f2;
-    --color-red-800: #fecaca;
-    --color-red-200: #991b1b;
-    --color-emerald-950: #f0fdf4;
-    --color-emerald-800: #bbf7d0;
-    --color-emerald-200: #166534;
     --color-amber-950: #fffbeb;
-    --color-amber-800: #fde68a;
+    --color-amber-900: #fef3c7;
+    --color-amber-800: #fcd34d;
+    --color-amber-700: #f59e0b;
+    --color-amber-400: #b45309;
+    --color-amber-300: #92400e;
+    --color-amber-200: #78350f;
+
+    --color-emerald-950: #ecfdf5;
+    --color-emerald-900: #d1fae5;
+    --color-emerald-800: #6ee7b7;
+    --color-emerald-400: #047857;
+    --color-emerald-300: #065f46;
+    --color-emerald-200: #065f46;
+
+    --color-red-950: #fef2f2;
+    --color-red-900: #fee2e2;
+    --color-red-800: #fca5a5;
+    --color-red-400: #dc2626;
+    --color-red-300: #b91c1c;
+    --color-red-200: #991b1b;
+    --color-red-100: #7f1d1d;
+
     --color-blue-950: #eff6ff;
-    --color-blue-800: #bfdbfe;
+    --color-blue-900: #dbeafe;
+    --color-blue-800: #93c5fd;
+    --color-blue-400: #1d4ed8;
+    --color-blue-300: #1e40af;
+    --color-blue-200: #1e3a8a;
+
+    --color-indigo-950: #eef2ff;
+    --color-indigo-900: #e0e7ff;
+    --color-indigo-800: #a5b4fc;
+    --color-indigo-400: #4338ca;
+    --color-indigo-300: #3730a3;
+    --color-indigo-200: #312e81;
+
     --color-purple-950: #faf5ff;
-    --color-purple-800: #e9d5ff;
+    --color-purple-900: #f3e8ff;
+    --color-purple-800: #d8b4fe;
+    --color-purple-400: #7e22ce;
+    --color-purple-300: #6b21a8;
+    --color-purple-200: #581c87;
+  }
+}
+
+/* Light-mode-specific surface, badge, and button contrast refinements */
+:root[data-theme="light"],
+html.light,
+html[data-theme="light"] {
+  /* Ensure text-amber-500 labels and icons meet WCAG AA contrast on light surfaces */
+  .text-amber-500 {
+    color: #b45309;
+  }
+
+  .text-amber-500\/30 {
+    color: rgba(180, 83, 9, 0.45);
+  }
+
+  /* Keep primary amber action buttons vibrant with high-contrast dark slate text */
+  .bg-amber-500 {
+    background-color: #f59e0b;
+  }
+
+  .hover\:bg-amber-400:hover {
+    background-color: #d97706;
+  }
+
+  .bg-amber-500.text-slate-950,
+  .bg-amber-400\/50.text-slate-950,
+  .from-amber-600.text-slate-950 {
+    color: #090d16;
+  }
+
+  .from-amber-600 .bg-slate-950 {
+    background-color: #0f172a;
+    color: #ffffff;
+  }
+
+  .from-amber-600 .bg-slate-950:hover {
+    background-color: #1e293b;
+  }
+
+  /* Keep white text on solid destructive/accent buttons and badges */
+  .bg-red-600,
+  .bg-red-500,
+  .bg-purple-600,
+  .hover\:bg-purple-600:hover {
+    color: #ffffff;
+  }
+
+  /* Clean white card surfaces with crisp borders and subtle elevation in light mode */
+  .bg-slate-900\/90,
+  .bg-slate-900\/80,
+  .bg-slate-900\/60,
+  .bg-slate-900\/40 {
+    background-color: #ffffff;
+    box-shadow: 0 1px 3px 0 rgba(15, 23, 42, 0.05), 0 1px 2px -1px rgba(15, 23, 42, 0.03);
+  }
+
+  /* Crisp recessed wells and disabled/coming-soon utility cards in light mode */
+  .bg-slate-950\/40,
+  .bg-slate-950\/60,
+  .bg-slate-950\/70,
+  .bg-slate-950\/80,
+  .bg-slate-950\/90 {
+    background-color: #f8fafc;
+  }
+
+  /* Clean modal inner panels in light mode */
+  .bg-slate-800\/60,
+  .bg-slate-800\/50,
+  .bg-slate-800\/40 {
+    background-color: #f8fafc;
+  }
+
+  /* Ensure translucent borders remain crisply visible in light mode */
+  .border-slate-800\/80,
+  .border-slate-800\/40,
+  .border-slate-900 {
+    border-color: #cbd5e1;
+  }
+
+  .border-slate-700\/60,
+  .border-slate-700\/80,
+  .border-slate-700\/90 {
+    border-color: #cbd5e1;
+  }
+
+  /* Rich, legible tinted badge backgrounds and borders in light mode */
+  .bg-amber-500\/10 {
+    background-color: #fffbeb;
+  }
+
+  .bg-amber-500\/15,
+  .bg-amber-500\/20 {
+    background-color: #fef3c7;
+  }
+
+  .border-amber-500\/20,
+  .border-amber-500\/25,
+  .border-amber-500\/30,
+  .border-amber-500\/40 {
+    border-color: #fbbf24;
+  }
+
+  .bg-indigo-500\/20 {
+    background-color: #eef2ff;
+  }
+
+  .border-indigo-500\/30 {
+    border-color: #a5b4fc;
+  }
+
+  .bg-emerald-600\/20 {
+    background-color: #ecfdf5;
+  }
+
+  .border-emerald-500\/30 {
+    border-color: #6ee7b7;
   }
 }
 
@@ -102,6 +285,7 @@ html[data-theme="dark"] {
   color-scheme: dark;
   --color-slate-950: #020617;
   --color-slate-900: #0f172a;
+  --color-slate-850: #172033;
   --color-slate-800: #1e293b;
   --color-slate-700: #334155;
   --color-slate-600: #475569;

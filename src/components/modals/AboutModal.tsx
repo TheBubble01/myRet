@@ -42,7 +42,7 @@ export const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose, current
             </div>
             <div>
               <h2 className="text-lg font-bold text-white">About myRet</h2>
-              <p className="text-xs text-amber-400 font-mono">myRet Version 0.1.0 (Production-Ready Field Edition)</p>
+              <p className="text-xs text-amber-400 font-mono">myRet Version 0.1.0</p>
             </div>
           </div>
           <button onClick={onClose} className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition">
@@ -54,30 +54,8 @@ export const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose, current
           <div className="p-3.5 bg-slate-800/60 rounded-xl border border-slate-700/60">
             <h3 className="font-semibold text-white text-sm mb-1">Product Mission</h3>
             <p className="text-slate-300 leading-relaxed text-xs">
-              <strong>myRet</strong> is engineered to liberate construction project teams from tedious, error-prone manual physical retirement notebooks. By streamlining daily labour and materials logging, automated arithmetic calculations, non-dated supplementary disbursements, and instant audit-ready PDF report generation, myRet bridges the gap between field site operations and corporate accounting.
+              myRet is designed to simplify construction site expenditure recording by replacing tedious, error-prone paper retirement notebooks with a digital solution. By streamlining daily labour and materials logging, automating arithmetic calculations, recording supplementary disbursements, and generating audit-ready PDF reports, myRet bridges the gap between site operations and corporate accounting.
             </p>
-          </div>
-
-          <div className="p-3.5 bg-slate-800/60 rounded-xl border border-slate-700/60">
-            <h3 className="font-semibold text-white text-sm mb-1">Architecture &amp; Reliability</h3>
-            <ul className="space-y-1.5 text-xs text-slate-300">
-              <li className="flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-                <span><strong>Progressive Web App (PWA):</strong> Fully installable on iOS, Android, and desktop browsers.</span>
-              </li>
-              <li className="flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-                <span><strong>Offline-First Resilience:</strong> Works uninterrupted on remote jobsites without network signal.</span>
-              </li>
-              <li className="flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-                <span><strong>48-Hour Trash Recovery:</strong> Safety margin preventing accidental jobsite data loss.</span>
-              </li>
-              <li className="flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-emerald-400 flex-shrink-0" />
-                <span><strong>Currency:</strong> Native Nigerian Naira (₦) formatting with high-precision arithmetic.</span>
-              </li>
-            </ul>
           </div>
 
           {/* Cloud backend config panel */}
@@ -131,10 +109,35 @@ export const AboutModal: React.FC<AboutModalProps> = ({ isOpen, onClose, current
             </div>
           )}
 
-          <div className="p-3.5 bg-slate-800/40 rounded-xl border border-slate-800 text-xs text-slate-400">
-            <p className="font-semibold text-slate-300 mb-0.5">Designed &amp; Developed by MJ Dederi</p>
-            <p>For MGK Global Limited</p>
-            <p className="mt-1 text-[11px] text-slate-500">&copy; 2026 MGK Global Limited. All rights reserved.</p>
+          <div className="p-3.5 bg-slate-800/40 rounded-xl border border-slate-800 text-xs text-slate-400 space-y-2">
+            <p className="font-semibold text-white">Designed &amp; Developed by MJ Dederi</p>
+            <p className="text-slate-300">
+              Have questions, feedback, or suggestions? Feel free to get in touch.
+            </p>
+            <p className="text-slate-300">
+              Email:{' '}
+              <a
+                href="mailto:dederimubarak@gmail.com"
+                className="text-amber-400 hover:underline font-medium"
+              >
+                dederimubarak@gmail.com
+              </a>
+            </p>
+            <p className="text-slate-300">
+              Facebook:{' '}
+              <a
+                href="https://www.facebook.com/mubarak.jibrildederi.1"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-amber-400 hover:underline font-medium"
+              >
+                Message the creator on Facebook.
+              </a>
+            </p>
+            <p className="pt-1 text-slate-300">For MGK Global Services ltd</p>
+            <p className="text-[11px] text-slate-500">
+              &copy; 2026 MGK Global Services Ltd. All rights reserved.
+            </p>
           </div>
         </div>
 

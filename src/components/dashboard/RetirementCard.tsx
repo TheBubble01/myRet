@@ -109,44 +109,8 @@ export const RetirementCard: React.FC<RetirementCardProps> = ({
             )}
           </div>
 
-          {/* Quick Action Button Icons & Context Menu */}
+          {/* Context Menu */}
           <div className="flex items-center gap-1 relative" ref={menuRef} onClick={(e) => e.stopPropagation()}>
-            {isOwner && onEdit && (
-              <button
-                onClick={() => onEdit(retirement)}
-                title="Edit Retirement"
-                className="p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-slate-800 transition"
-              >
-                <Edit3 className="w-4 h-4" />
-              </button>
-            )}
-            <button
-              onClick={() => onExport(retirement)}
-              title="Export Audit PDF"
-              className="p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-slate-800 transition"
-            >
-              <FileText className="w-4 h-4" />
-            </button>
-            {canDelete ? (
-              <button
-                onClick={() => onTrash(retirement.id)}
-                title="Delete Retirement (Move to Trash Bin)"
-                className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
-            ) : (
-              onRemoveImported && (
-                <button
-                  onClick={() => onRemoveImported(retirement)}
-                  title="Remove Imported Retirement"
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition"
-                >
-                  <LogOut className="w-4 h-4" />
-                </button>
-              )
-            )}
-
             <button
               onClick={() => setMenuOpen((prev) => !prev)}
               title="More Options"

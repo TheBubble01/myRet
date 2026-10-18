@@ -91,11 +91,36 @@ class SyncService {
     });
   }
 
+  private isDemoId(id?: string): boolean {
+    if (!id || typeof id !== 'string') return false;
+    if (id.startsWith('ret-demo-') || id.startsWith('dr-demo-') || id.startsWith('supp-demo-')) {
+      return true;
+    }
+    const localRet = storage.getRetirementById(id);
+    return Boolean(localRet?.isDemo);
+  }
+
   // --- Queue Storage & Persistence ---
   private loadQueue(): void {
     try {
       const stored = this.getStorageItem(SYNC_QUEUE_KEY);
-      this.queue = stored ? JSON.parse(stored) : [];
+      const parsed: SyncQueueItem[] = stored ? JSON.parse(stored) : [];
+      // Purge any accidentally queued demo operations from persisted storage
+      const filtered = parsed.filter((item) => {
+        if (item.payload?.isDemo || item.payload?.retirement?.isDemo) return false;
+        if (this.isDemoId(item.entityId) || this.isDemoId(item.retirementId)) return false;
+        if (
+          this.isDemoId(item.payload?.retirementA) ||
+          this.isDemoId(item.payload?.retirementB)
+        ) {
+          return false;
+        }
+        return true;
+      });
+      this.queue = filtered;
+      if (filtered.length !== parsed.length) {
+        this.setStorageItem(SYNC_QUEUE_KEY, JSON.stringify(this.queue));
+      }
     } catch (e) {
       console.error('[SyncService] Failed to load sync queue from localStorage:', e);
       this.queue = [];
@@ -118,7 +143,14 @@ class SyncService {
   // --- Enqueue Operations ---
   enqueue(type: SyncOperationType, entityId: string, payload: any, retirementId?: string): void {
     // If demo sample, never enqueue for cloud sync
-    if (payload?.isDemo || payload?.retirement?.isDemo) {
+    if (
+      payload?.isDemo ||
+      payload?.retirement?.isDemo ||
+      this.isDemoId(entityId) ||
+      this.isDemoId(retirementId) ||
+      this.isDemoId(payload?.retirementA) ||
+      this.isDemoId(payload?.retirementB)
+    ) {
       return;
     }
 
@@ -886,8 +918,16 @@ class SyncService {
       }
 
       case 'CONNECT_RETIREMENTS': {
-        const { retirementA, retirementB } = item.payload;
-        if (!retirementA || !retirementB || retirementA === retirementB) return;
+        const { retirementA, retirementB } = item.payload || {};
+        if (
+          !retirementA ||
+          !retirementB ||
+          retirementA === retirementB ||
+          this.isDemoId(retirementA) ||
+          this.isDemoId(retirementB)
+        ) {
+          return;
+        }
 
         // Try RPC connect_retirements
         let connected = false;
@@ -917,7 +957,15 @@ class SyncService {
       }
 
       case 'DISCONNECT_RETIREMENTS': {
-        const { retirementA, retirementB } = item.payload;
+        const { retirementA, retirementB } = item.payload || {};
+        if (
+          !retirementA ||
+          !retirementB ||
+          this.isDemoId(retirementA) ||
+          this.isDemoId(retirementB)
+        ) {
+          return;
+        }
         const first = retirementA < retirementB ? retirementA : retirementB;
         const second = retirementA < retirementB ? retirementB : retirementA;
         const { error } = await supabase

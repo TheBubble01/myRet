@@ -66,11 +66,13 @@ export const ConnectRetirementModal: React.FC<ConnectRetirementModalProps> = ({
     storage.saveRetirement(updatedSource);
     storage.saveRetirement(updatedTarget);
 
-    syncService.enqueue(
-      'CONNECT_RETIREMENTS',
-      `${updatedSource.id}_${updatedTarget.id}`,
-      { retirementA: updatedSource.id, retirementB: updatedTarget.id }
-    );
+    if (!updatedSource.isDemo && !updatedTarget.isDemo) {
+      syncService.enqueue(
+        'CONNECT_RETIREMENTS',
+        `${updatedSource.id}_${updatedTarget.id}`,
+        { retirementA: updatedSource.id, retirementB: updatedTarget.id }
+      );
+    }
 
     storage.logActivity(
       retirement.id,
@@ -122,11 +124,13 @@ export const ConnectRetirementModal: React.FC<ConnectRetirementModalProps> = ({
     }
 
     storage.saveRetirement(updatedSource);
-    syncService.enqueue(
-      'DISCONNECT_RETIREMENTS',
-      `${retirement.id}_${targetId}`,
-      { retirementA: retirement.id, retirementB: targetId }
-    );
+    if (!updatedSource.isDemo && !target?.isDemo) {
+      syncService.enqueue(
+        'DISCONNECT_RETIREMENTS',
+        `${retirement.id}_${targetId}`,
+        { retirementA: retirement.id, retirementB: targetId }
+      );
+    }
 
     storage.logActivity(
       retirement.id,
