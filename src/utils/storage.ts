@@ -490,6 +490,69 @@ class StorageService {
     return true;
   }
 
+  removeImportedRetirement(id: string, skipSync: boolean = false): boolean {
+    const all = this.getItem<Retirement[]>(STORAGE_KEYS.RETIREMENTS, []);
+    const target = all.find((r) => r.id === id);
+    const currentUser = this.getCurrentUser();
+
+    // Prevent owners from accidentally invoking imported-retirement removal on their own retirement
+    if (target && currentUser && target.ownerId === currentUser.id) {
+      return false;
+    }
+
+    if (!skipSync && target && !target.isDemo) {
+      if (!globalSyncTrigger) {
+        return false;
+      }
+      const hasSynced = this.hasRetirementEverSynced(target);
+      globalSyncTrigger(
+        'REMOVE_IMPORTED_RETIREMENT',
+        id,
+        {
+          id,
+          code: target.code,
+          ownerId: target.ownerId,
+          userId: currentUser?.id,
+          hasSyncedToCloud: hasSynced,
+        },
+        id
+      );
+    }
+
+    const filtered = all
+      .filter((r) => r.id !== id)
+      .map((r) =>
+        Array.isArray(r.connectedRetirementIds) && r.connectedRetirementIds.includes(id)
+          ? {
+              ...r,
+              connectedRetirementIds: r.connectedRetirementIds.filter((cid) => cid !== id),
+            }
+          : r
+      );
+    this.setItem(STORAGE_KEYS.RETIREMENTS, filtered);
+
+    // Remove local cached copies of child daily records, supplementary entries, and activity logs
+    const records = this.getItem<DailyRecord[]>(STORAGE_KEYS.DAILY_RECORDS, []);
+    this.setItem(
+      STORAGE_KEYS.DAILY_RECORDS,
+      records.filter((r) => r.retirementId !== id)
+    );
+
+    const supplementary = this.getItem<SupplementaryEntry[]>(STORAGE_KEYS.SUPPLEMENTARY, []);
+    this.setItem(
+      STORAGE_KEYS.SUPPLEMENTARY,
+      supplementary.filter((s) => s.retirementId !== id)
+    );
+
+    const logs = this.getItem<ActivityLog[]>(STORAGE_KEYS.ACTIVITY_LOGS, []);
+    this.setItem(
+      STORAGE_KEYS.ACTIVITY_LOGS,
+      logs.filter((l) => l.retirementId !== id)
+    );
+
+    return true;
+  }
+
   runExpiredTrashCleanup(): void {
     this.cleanupExpiredTrash();
   }

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   FileSpreadsheet,
   Calendar,
@@ -15,11 +15,12 @@ import {
   Cloud,
   Clock,
   Check,
+  MoreVertical,
+  LogOut,
 } from 'lucide-react';
 import { Retirement, UserProfile } from '../../types';
 import { storage } from '../../utils/storage';
 import { formatNaira } from '../../utils/currency';
-import { isUserAdmin } from '../../utils/supabaseClient';
 
 interface RetirementCardProps {
   retirement: Retirement;
@@ -27,6 +28,7 @@ interface RetirementCardProps {
   onOpen: (retirement: Retirement) => void;
   onEdit?: (retirement: Retirement) => void;
   onTrash: (id: string) => void;
+  onRemoveImported?: (retirement: Retirement) => void;
   onExport: (retirement: Retirement) => void;
 }
 
@@ -36,15 +38,32 @@ export const RetirementCard: React.FC<RetirementCardProps> = ({
   onOpen,
   onEdit,
   onTrash,
+  onRemoveImported,
   onExport,
 }) => {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [menuOpen]);
+
   const totals = storage.calculateTotals(retirement.id);
   const isOwner = retirement.ownerId === currentUser.id;
   const userAccess = retirement.access.find(
     (a) => a.userId === currentUser.id || a.userEmail.toLowerCase() === currentUser.email.toLowerCase()
   );
   const role = isOwner ? 'OWNER' : userAccess?.role || 'REVIEWER';
-  const canDelete = isOwner || isUserAdmin(currentUser);
+  const canDelete = isOwner;
 
   return (
     <div
@@ -90,8 +109,8 @@ export const RetirementCard: React.FC<RetirementCardProps> = ({
             )}
           </div>
 
-          {/* Quick Action Button Icons */}
-          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+          {/* Quick Action Button Icons & Context Menu */}
+          <div className="flex items-center gap-1 relative" ref={menuRef} onClick={(e) => e.stopPropagation()}>
             {isOwner && onEdit && (
               <button
                 onClick={() => onEdit(retirement)}
@@ -108,7 +127,7 @@ export const RetirementCard: React.FC<RetirementCardProps> = ({
             >
               <FileText className="w-4 h-4" />
             </button>
-            {canDelete && (
+            {canDelete ? (
               <button
                 onClick={() => onTrash(retirement.id)}
                 title="Delete Retirement (Move to Trash Bin)"
@@ -116,6 +135,91 @@ export const RetirementCard: React.FC<RetirementCardProps> = ({
               >
                 <Trash2 className="w-4 h-4" />
               </button>
+            ) : (
+              onRemoveImported && (
+                <button
+                  onClick={() => onRemoveImported(retirement)}
+                  title="Remove Imported Retirement"
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              )
+            )}
+
+            <button
+              onClick={() => setMenuOpen((prev) => !prev)}
+              title="More Options"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+            >
+              <MoreVertical className="w-4 h-4" />
+            </button>
+
+            {menuOpen && (
+              <div className="absolute right-0 top-9 z-30 w-56 rounded-xl bg-slate-900 border border-slate-700/80 shadow-2xl py-1.5 text-xs">
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onOpen(retirement);
+                  }}
+                  className="w-full px-3.5 py-2 text-left text-slate-200 hover:bg-slate-800 flex items-center gap-2.5 transition"
+                >
+                  <Eye className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Open Retirement</span>
+                </button>
+
+                {isOwner && onEdit && (
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onEdit(retirement);
+                    }}
+                    className="w-full px-3.5 py-2 text-left text-slate-200 hover:bg-slate-800 flex items-center gap-2.5 transition"
+                  >
+                    <Edit3 className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Edit Details</span>
+                  </button>
+                )}
+
+                <button
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onExport(retirement);
+                  }}
+                  className="w-full px-3.5 py-2 text-left text-slate-200 hover:bg-slate-800 flex items-center gap-2.5 transition"
+                >
+                  <FileText className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Export Audit PDF</span>
+                </button>
+
+                <div className="my-1 border-t border-slate-800" />
+
+                {canDelete ? (
+                  <button
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onTrash(retirement.id);
+                    }}
+                    className="w-full px-3.5 py-2 text-left text-red-400 hover:bg-red-950/50 flex items-center gap-2.5 font-medium transition"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Move to Trash Bin</span>
+                  </button>
+                ) : (
+                  onRemoveImported && (
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onRemoveImported(retirement);
+                      }}
+                      className="w-full px-3.5 py-2 text-left text-red-400 hover:bg-red-950/50 flex items-center gap-2.5 font-medium transition"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>Remove Imported Retirement</span>
+                    </button>
+                  )
+                )}
+              </div>
             )}
           </div>
         </div>

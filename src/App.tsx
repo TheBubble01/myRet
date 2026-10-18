@@ -9,6 +9,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Users,
+  LogOut,
 } from 'lucide-react';
 import { Session } from '@supabase/supabase-js';
 import { Retirement, UserProfile, ActiveUtility } from './types';
@@ -54,6 +55,7 @@ export default function App() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [retirementToEdit, setRetirementToEdit] = useState<Retirement | null>(null);
   const [retirementToTrash, setRetirementToTrash] = useState<Retirement | null>(null);
+  const [retirementToRemoveImported, setRetirementToRemoveImported] = useState<Retirement | null>(null);
   const [showClearDemoConfirm, setShowClearDemoConfirm] = useState(false);
   const [showAddExistingModal, setShowAddExistingModal] = useState(false);
   const [showGuideModal, setShowGuideModal] = useState(false);
@@ -208,6 +210,18 @@ export default function App() {
     if (retirementToTrash) {
       storage.moveToTrash(retirementToTrash.id);
       setRetirementToTrash(null);
+      refreshRetirements();
+    }
+  };
+
+  const handleRemoveImportedRetirement = (ret: Retirement) => {
+    setRetirementToRemoveImported(ret);
+  };
+
+  const handleConfirmRemoveImported = () => {
+    if (retirementToRemoveImported) {
+      storage.removeImportedRetirement(retirementToRemoveImported.id);
+      setRetirementToRemoveImported(null);
       refreshRetirements();
     }
   };
@@ -522,6 +536,7 @@ export default function App() {
                     onOpen={handleOpenRetirement}
                     onEdit={handleEditRetirement}
                     onTrash={handleTrashRetirement}
+                    onRemoveImported={handleRemoveImportedRetirement}
                     onExport={(r) => setExportTargetRetirement(r)}
                   />
                 ))}
@@ -613,6 +628,49 @@ export default function App() {
                 className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs shadow-lg shadow-red-600/20 transition"
               >
                 Yes, Move to Trash
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Remove Imported Retirement Confirmation Modal */}
+      {retirementToRemoveImported && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-6 shadow-2xl text-slate-100 space-y-4">
+            <div className="flex items-center gap-3 text-red-400">
+              <div className="w-10 h-10 rounded-xl bg-red-950/60 border border-red-800/60 flex items-center justify-center">
+                <LogOut className="w-5 h-5 text-red-400" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Remove Imported Retirement</h3>
+                <p className="text-xs text-slate-400">Remove from Your Workspace Only</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Remove <strong className="text-white">{retirementToRemoveImported.title}</strong> ({retirementToRemoveImported.code}) from your workspace?
+            </p>
+            <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-slate-400 space-y-1">
+              <p>• This only removes the retirement from your workspace.</p>
+              <p>• The original owner&apos;s retirement, daily records, and supplementary entries remain completely untouched.</p>
+              <p>• You can re-import it later using its code ({retirementToRemoveImported.code}) if you still have access.</p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setRetirementToRemoveImported(null)}
+                className="px-4 py-2 rounded-xl text-slate-400 hover:text-white text-xs font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmRemoveImported}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs shadow-lg shadow-red-600/20 transition"
+              >
+                Remove from Workspace
               </button>
             </div>
           </div>

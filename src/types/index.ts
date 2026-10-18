@@ -101,6 +101,7 @@ export type ActiveUtility = 'retirement' | 'project_report' | 'other_utilities' 
 export type SyncOperationType =
   | 'UPSERT_RETIREMENT'
   | 'DELETE_RETIREMENT'
+  | 'REMOVE_IMPORTED_RETIREMENT'
   | 'UPSERT_DAILY_RECORD'
   | 'DELETE_DAILY_RECORD'
   | 'UPSERT_SUPPLEMENTARY'

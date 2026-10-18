@@ -156,6 +156,39 @@ class SyncService {
         hasSyncedToCloud,
       };
       this.purgeQueueForRetirement(entityId, true);
+    } else if (type === 'REMOVE_IMPORTED_RETIREMENT') {
+      const existingRemoveItem = this.queue.find(
+        (item) => item.type === 'REMOVE_IMPORTED_RETIREMENT' && item.entityId === entityId
+      );
+      const localRet = storage.getRetirementById(entityId);
+      const queuedHasSynced = this.queue.some(
+        (item) =>
+          (item.entityId === entityId || item.retirementId === entityId) &&
+          (item.payload?.hasSyncedToCloud === true ||
+            (item.type === 'UPSERT_RETIREMENT' &&
+              item.payload &&
+              storage.hasRetirementEverSynced(item.payload)))
+      );
+      const hasPositiveSyncEvidence =
+        payload?.hasSyncedToCloud === true ||
+        existingRemoveItem?.payload?.hasSyncedToCloud === true ||
+        queuedHasSynced ||
+        (localRet ? storage.hasRetirementEverSynced(localRet) : false);
+
+      const hasSyncedToCloud = hasPositiveSyncEvidence
+        ? true
+        : existingRemoveItem?.payload?.hasSyncedToCloud === false ||
+            payload?.hasSyncedToCloud === false ||
+            Boolean(localRet)
+          ? false
+          : true;
+
+      payload = {
+        ...(existingRemoveItem?.payload || {}),
+        ...payload,
+        hasSyncedToCloud,
+      };
+      this.purgeQueueForRetirement(entityId, false, true);
     } else if (type === 'DELETE_DAILY_RECORD') {
       this.queue = this.queue.filter(
         (item) => !(item.type === 'UPSERT_DAILY_RECORD' && item.entityId === entityId)
@@ -171,13 +204,15 @@ class SyncService {
       (item) =>
         item.entityId === entityId &&
         item.type === type &&
-        (item.status === 'pending' || type === 'DELETE_RETIREMENT')
+        (item.status === 'pending' ||
+          type === 'DELETE_RETIREMENT' ||
+          type === 'REMOVE_IMPORTED_RETIREMENT')
     );
 
     if (existingIndex >= 0) {
       const existingItem = this.queue[existingIndex];
       const mergedPayload =
-        type === 'DELETE_RETIREMENT'
+        type === 'DELETE_RETIREMENT' || type === 'REMOVE_IMPORTED_RETIREMENT'
           ? {
               ...(existingItem.payload || {}),
               ...payload,
@@ -217,10 +252,21 @@ class SyncService {
     }
   }
 
-  private purgeQueueForRetirement(retirementId: string, keepDeleteOperation: boolean = false): void {
+  private purgeQueueForRetirement(
+    retirementId: string,
+    keepDeleteOperation: boolean = false,
+    keepRemoveImportedOperation: boolean = false
+  ): void {
     const beforeLen = this.queue.length;
     this.queue = this.queue.filter((item) => {
       if (keepDeleteOperation && item.type === 'DELETE_RETIREMENT' && item.entityId === retirementId) {
+        return true;
+      }
+      if (
+        keepRemoveImportedOperation &&
+        item.type === 'REMOVE_IMPORTED_RETIREMENT' &&
+        item.entityId === retirementId
+      ) {
         return true;
       }
       if (item.entityId === retirementId || item.retirementId === retirementId) {
@@ -579,6 +625,53 @@ class SyncService {
         break;
       }
 
+      case 'REMOVE_IMPORTED_RETIREMENT': {
+        const { id } = item.payload || {};
+        if (!id) {
+          throw new Error('Cannot remove imported retirement: missing retirement ID in queue payload');
+        }
+
+        const localRet = storage.getRetirementById(id);
+        const hasEverSynced =
+          item.payload?.hasSyncedToCloud === true ||
+          (localRet
+            ? storage.hasRetirementEverSynced(localRet)
+            : item.payload?.hasSyncedToCloud !== false);
+
+        const { data: deletedRows, error } = await supabase
+          .from('retirement_access')
+          .delete()
+          .eq('retirement_id', id)
+          .eq('user_id', currentUserId)
+          .select('id');
+
+        if (error) {
+          throw error;
+        }
+
+        const deletedCount = Array.isArray(deletedRows) ? deletedRows.length : 0;
+        if (deletedCount === 0 && hasEverSynced) {
+          const { data: remainingRow, error: checkErr } = await supabase
+            .from('retirement_access')
+            .select('id')
+            .eq('retirement_id', id)
+            .eq('user_id', currentUserId)
+            .maybeSingle();
+
+          if (checkErr) {
+            throw checkErr;
+          }
+          if (remainingRow?.id) {
+            throw new Error(
+              `Removal of imported retirement ${id} could not be confirmed in cloud (access row still exists; check RLS self-removal policy on retirement_access).`
+            );
+          }
+        }
+
+        this.purgeQueueForRetirement(id, false, true);
+        break;
+      }
+
       case 'UPSERT_DAILY_RECORD': {
         const record: DailyRecord = item.payload;
         const normalizedDate = normalizeDate(record.date);
@@ -882,7 +975,11 @@ class SyncService {
 
       // Track entities with pending deletions in the local queue so pullFromCloud never resurrects them
       const pendingDeleteRetIds = new Set(
-        this.queue.filter((q) => q.type === 'DELETE_RETIREMENT').map((q) => q.entityId)
+        this.queue
+          .filter(
+            (q) => q.type === 'DELETE_RETIREMENT' || q.type === 'REMOVE_IMPORTED_RETIREMENT'
+          )
+          .map((q) => q.entityId)
       );
       const pendingDeleteDailyIds = new Set(
         this.queue.filter((q) => q.type === 'DELETE_DAILY_RECORD').map((q) => q.entityId)
@@ -1331,7 +1428,18 @@ class SyncService {
       }
     }
 
-    // 3. Pull latest cloud data so the claimed retirement is in local storage immediately
+    // 3. Clear any pending or failed REMOVE_IMPORTED_RETIREMENT queue items for this retirement so pullFromCloud can hydrate it
+    if (retId) {
+      const beforeLen = this.queue.length;
+      this.queue = this.queue.filter(
+        (q) => !(q.type === 'REMOVE_IMPORTED_RETIREMENT' && q.entityId === retId)
+      );
+      if (this.queue.length !== beforeLen) {
+        this.saveQueue();
+      }
+    }
+
+    // 4. Pull latest cloud data so the claimed retirement is in local storage immediately
     await this.pullFromCloud();
     const result = storage.getRetirementById(retId!);
     return result || null;

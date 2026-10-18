@@ -38,11 +38,10 @@ export const AddExistingModal: React.FC<AddExistingModalProps> = ({
     setIsLoading(true);
 
     try {
-      // 1. Check local storage first
-      let retirement = storage.getRetirementByCode(cleanCode);
+      let retirement: Retirement | undefined = undefined;
 
-      // 2. If not found locally, look up in cloud Supabase
-      if (!retirement) {
+      // 1. When online, claim in cloud first so retirement_access is recorded and any pending removal is cleared
+      if (typeof navigator === 'undefined' || navigator.onLine) {
         try {
           const claimed = await syncService.claimRetirementByCode(cleanCode);
           if (claimed) {
@@ -50,13 +49,18 @@ export const AddExistingModal: React.FC<AddExistingModalProps> = ({
           }
         } catch (cloudErr: any) {
           console.warn('[AddExistingModal] Cloud claim error:', cloudErr);
-          // If cloud threw an explicit user-facing message, use it
-          if (cloudErr?.message && !cloudErr.message.includes('schema cache')) {
+          const localMatch = storage.getRetirementByCode(cleanCode);
+          if (!localMatch && cloudErr?.message && !cloudErr.message.includes('schema cache')) {
             setError(cloudErr.message);
             setIsLoading(false);
             return;
           }
         }
+      }
+
+      // 2. Fallback to local storage if offline or not yet synced to cloud
+      if (!retirement) {
+        retirement = storage.getRetirementByCode(cleanCode);
       }
 
       if (!retirement) {
