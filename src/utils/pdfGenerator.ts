@@ -1,8 +1,19 @@
-import jsPDF from 'jspdf';
+import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Retirement, DailyRecord, SupplementaryEntry } from '../types';
+import {
+  Retirement,
+  DailyRecord,
+  SupplementaryEntry,
+  CompanyHeaderConfig,
+  ReportMetadataConfig,
+  ReportMetadataFieldId,
+} from '../types';
 import { formatNaira } from './currency';
 import { loadPDFFonts } from './pdfFonts';
+import {
+  storage,
+  DEFAULT_COMPANY_HEADER_CONFIG,
+} from './storage';
 
 export interface PDFExportOptions {
   retirement: Retirement;
@@ -15,6 +26,8 @@ export interface PDFExportOptions {
     dailyRecords: DailyRecord[];
     supplementary: SupplementaryEntry[];
   }[];
+  companyHeader?: CompanyHeaderConfig;
+  reportMetadata?: ReportMetadataConfig;
 }
 
 interface RetirementReportGroup {
@@ -24,8 +37,135 @@ interface RetirementReportGroup {
   isMain: boolean;
 }
 
+export const MAX_LOGO_WIDTH_PX = 300;
+export const MAX_LOGO_HEIGHT_PX = 100;
+export const MAX_LOGO_DATA_URL_BYTES = 40 * 1024; // 40 KB
+
+/**
+ * Compresses and downscales an uploaded logo image (PNG, JPEG, or WebP) client-side:
+ * - Preserves aspect ratio within a maximum 300 x 100 px bounding box.
+ * - Preserves transparency where possible (prefers PNG).
+ * - Guarantees the resulting base64 data URL is <= 40 KB.
+ */
+export async function compressCompanyLogo(file: File): Promise<{
+  dataUrl: string;
+  mimeType: 'image/png' | 'image/jpeg';
+  width: number;
+  height: number;
+}> {
+  const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
+  if (!allowedTypes.includes(file.type.toLowerCase())) {
+    throw new Error('Unsupported image format. Please upload a PNG, JPEG, or WebP image.');
+  }
+
+  const rawDataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Failed to read image file.'));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Failed to decode image file.'));
+    image.src = rawDataUrl;
+  });
+
+  const srcW = img.naturalWidth || img.width || 1;
+  const srcH = img.naturalHeight || img.height || 1;
+
+  // Initial aspect-preserving scale within 300 x 100 bounding box
+  const initialScale = Math.min(1, MAX_LOGO_WIDTH_PX / srcW, MAX_LOGO_HEIGHT_PX / srcH);
+  let targetW = Math.max(1, Math.round(srcW * initialScale));
+  let targetH = Math.max(1, Math.round(srcH * initialScale));
+
+  const renderToCanvas = (w: number, h: number, fillBackground?: string): HTMLCanvasElement => {
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Canvas 2D context is not available.');
+    }
+    ctx.clearRect(0, 0, w, h);
+    if (fillBackground) {
+      ctx.fillStyle = fillBackground;
+      ctx.fillRect(0, 0, w, h);
+    }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas;
+  };
+
+  const preferPng = file.type.toLowerCase() === 'image/png' || file.type.toLowerCase() === 'image/webp';
+
+  // 1. Try PNG first (preserves transparency) at progressive scales if needed
+  if (preferPng) {
+    const scales = [1, 0.85, 0.7, 0.55, 0.45];
+    for (const s of scales) {
+      const w = Math.max(1, Math.round(targetW * s));
+      const h = Math.max(1, Math.round(targetH * s));
+      const canvas = renderToCanvas(w, h);
+      const pngUrl = canvas.toDataURL('image/png');
+      if (pngUrl.length <= MAX_LOGO_DATA_URL_BYTES) {
+        return {
+          dataUrl: pngUrl,
+          mimeType: 'image/png',
+          width: w,
+          height: h,
+        };
+      }
+    }
+  }
+
+  // 2. Fallback / JPEG path: composite against slate-900 header background (#0f172a) so any transparency blends seamlessly
+  const qualities = [0.88, 0.78, 0.68, 0.55, 0.45];
+  for (const q of qualities) {
+    const canvas = renderToCanvas(targetW, targetH, '#0f172a');
+    const jpegUrl = canvas.toDataURL('image/jpeg', q);
+    if (jpegUrl.length <= MAX_LOGO_DATA_URL_BYTES) {
+      return {
+        dataUrl: jpegUrl,
+        mimeType: 'image/jpeg',
+        width: targetW,
+        height: targetH,
+      };
+    }
+  }
+
+  // 3. Final dimension reduction fallback to strictly guarantee <= 40 KB
+  targetW = Math.max(1, Math.round(targetW * 0.6));
+  targetH = Math.max(1, Math.round(targetH * 0.6));
+  const finalCanvas = renderToCanvas(targetW, targetH, '#0f172a');
+  const finalJpeg = finalCanvas.toDataURL('image/jpeg', 0.5);
+  if (finalJpeg.length > MAX_LOGO_DATA_URL_BYTES) {
+    throw new Error('Logo image is too complex to compress under 40 KB. Please choose a simpler logo.');
+  }
+
+  return {
+    dataUrl: finalJpeg,
+    mimeType: 'image/jpeg',
+    width: targetW,
+    height: targetH,
+  };
+}
+
 export async function generateRetirementPDF(options: PDFExportOptions): Promise<jsPDF> {
-  const { retirement, dailyRecords, supplementary, startDate, endDate, connectedRetirements } = options;
+  const {
+    retirement,
+    dailyRecords,
+    supplementary,
+    startDate,
+    endDate,
+    connectedRetirements,
+    companyHeader: customHeaderOption,
+    reportMetadata: customMetadataOption,
+  } = options;
+
+  const companyHeader = customHeaderOption || storage.getCompanyHeaderConfig();
+  const reportMetadata = customMetadataOption || storage.getReportMetadataConfig();
 
   const doc = new jsPDF({
     orientation: 'portrait',
@@ -96,64 +236,204 @@ export async function generateRetirementPDF(options: PDFExportOptions): Promise<
       : []),
   ];
 
-  // Header Banner Background
-  doc.setFillColor(15, 23, 42); // slate-900
-  doc.rect(14, currentY, pageWidth - 28, 24, 'F');
-
-  // Title
-  doc.setTextColor(245, 158, 11); // Amber-500
-  doc.setFontSize(15);
-  doc.setFont(fontName, 'bold');
-  doc.text('myRet', 20, currentY + 9.5);
-
-  doc.setTextColor(255, 255, 255);
-  doc.setFontSize(8.5);
-  doc.setFont(fontName, 'normal');
-  doc.text(
-    hasConnected
-      ? 'COMBINED SITE EXPENDITURE & RETIREMENT REPORT'
-      : 'CONSTRUCTION SITE EXPENDITURE & RETIREMENT REPORT',
-    40,
-    currentY + 9.5
+  // --- GLOBAL COMPANY HEADER ---
+  const hasLogo = Boolean(
+    companyHeader.logoDataUrl && companyHeader.logoDataUrl.startsWith('data:image/')
   );
+  const maxLogoW = 24;
+  const maxLogoH = 15;
+  let drawLogoW = 0;
+  let drawLogoH = 0;
 
-  doc.setTextColor(148, 163, 184); // slate-400
-  doc.setFontSize(7.5);
-  doc.text(
-    hasConnected
+  if (hasLogo) {
+    const rawW = companyHeader.logoWidth && companyHeader.logoWidth > 0 ? companyHeader.logoWidth : 180;
+    const rawH = companyHeader.logoHeight && companyHeader.logoHeight > 0 ? companyHeader.logoHeight : 60;
+    const scale = Math.min(maxLogoW / rawW, maxLogoH / rawH);
+    drawLogoW = Math.max(8, Math.round(rawW * scale * 10) / 10);
+    drawLogoH = Math.max(6, Math.round(rawH * scale * 10) / 10);
+  }
+
+  const companyNameText = (companyHeader.companyName || DEFAULT_COMPANY_HEADER_CONFIG.companyName).trim();
+  const addressText = (companyHeader.address || '').trim();
+  const contactParts: string[] = [];
+  if (companyHeader.phone && companyHeader.phone.trim()) {
+    contactParts.push(`Tel: ${companyHeader.phone.trim()}`);
+  }
+  if (companyHeader.email && companyHeader.email.trim()) {
+    contactParts.push(`Email: ${companyHeader.email.trim()}`);
+  }
+  if (companyHeader.website && companyHeader.website.trim()) {
+    contactParts.push(`Web: ${companyHeader.website.trim()}`);
+  }
+  const contactLineText = contactParts.join('  |  ');
+
+  const reportTitleText = hasConnected
+    ? 'COMBINED SITE EXPENDITURE & RETIREMENT REPORT'
+    : 'CONSTRUCTION SITE EXPENDITURE & RETIREMENT REPORT';
+
+  const configuredSubtitle =
+    typeof companyHeader.subtitle === 'string' && companyHeader.subtitle.trim().length > 0
+      ? companyHeader.subtitle.trim()
+      : DEFAULT_COMPANY_HEADER_CONFIG.subtitle || 'Your Site Expenditure, Digitized. | Official Audit Record';
+
+  const subtitleText = hasConnected
+    ? configuredSubtitle === DEFAULT_COMPANY_HEADER_CONFIG.subtitle
       ? `Consolidated Statement (${reportGroups.length} Connected Milestones) | Official Audit Record`
-      : 'Your Site Expenditure, Digitized. | Official Audit Record',
-    20,
-    currentY + 18
-  );
+      : `${configuredSubtitle} (${reportGroups.length} Connected Milestones)`
+    : configuredSubtitle;
 
-  // Status/Code badge on right
-  doc.setFillColor(245, 158, 11);
-  doc.roundedRect(pageWidth - 62, currentY + 5.5, 44, 13, 2, 2, 'F');
-  doc.setTextColor(15, 23, 42);
-  doc.setFont(fontName, 'bold');
-  doc.setFontSize(8.5);
-  doc.text(retirement.code, pageWidth - 40, currentY + 14, { align: 'center' });
+  const isDefaultMinimalHeader =
+    !hasLogo &&
+    companyNameText === 'myRet' &&
+    !addressText &&
+    !contactLineText;
 
-  currentY += 29;
+  if (isDefaultMinimalHeader) {
+    // Preserve exact classic banner layout when using default minimal header
+    doc.setFont(fontName, 'normal');
+    doc.setFontSize(7.5);
+    const subLines: string[] = doc.splitTextToSize(subtitleText, pageWidth - 88);
+    const bannerHeight = Math.max(24, 15 + subLines.length * 3.8 + 4);
 
-  // Metadata Box
-  doc.setFillColor(248, 250, 252); // slate-50
-  doc.setDrawColor(203, 213, 225); // slate-300
-  doc.roundedRect(14, currentY, pageWidth - 28, 26, 2, 2, 'FD');
+    doc.setFillColor(15, 23, 42); // slate-900
+    doc.rect(14, currentY, pageWidth - 28, bannerHeight, 'F');
 
-  doc.setFontSize(8);
-  doc.setTextColor(100, 116, 139);
-  doc.setFont(fontName, 'bold');
-  doc.text('RETIREMENT:', 18, currentY + 6.5);
-  doc.text('PROJECT / SITE:', 18, currentY + 13.5);
-  doc.text('PERIOD:', 18, currentY + 20.5);
+    doc.setTextColor(245, 158, 11); // Amber-500
+    doc.setFontSize(15);
+    doc.setFont(fontName, 'bold');
+    doc.text('myRet', 20, currentY + 9.5);
 
-  doc.setFont(fontName, 'normal');
-  doc.setTextColor(15, 23, 42);
-  doc.text(retirement.title, 55, currentY + 6.5);
-  doc.text(retirement.project, 55, currentY + 13.5);
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(8.5);
+    doc.setFont(fontName, 'normal');
+    doc.text(reportTitleText, 40, currentY + 9.5);
 
+    doc.setTextColor(148, 163, 184); // slate-400
+    doc.setFontSize(7.5);
+    doc.text(subLines, 20, currentY + 18);
+
+    // Status/Code badge on right
+    doc.setFillColor(245, 158, 11);
+    doc.roundedRect(pageWidth - 62, currentY + 5.5, 44, 13, 2, 2, 'F');
+    doc.setTextColor(15, 23, 42);
+    doc.setFont(fontName, 'bold');
+    doc.setFontSize(8.5);
+    doc.text(retirement.code, pageWidth - 40, currentY + 14, { align: 'center' });
+
+    currentY += bannerHeight + 5;
+  } else {
+    // Dynamic multi-line Company Header layout supporting logo, company name, address, phone, email, website & subtitle
+    const textStartX = hasLogo ? 18 + drawLogoW + 4 : 20;
+    const maxTextWidth = Math.max(60, pageWidth - 66 - textStartX);
+
+    doc.setFont(fontName, 'bold');
+    doc.setFontSize(12.5);
+    const nameLines: string[] = doc.splitTextToSize(companyNameText, maxTextWidth);
+
+    doc.setFont(fontName, 'bold');
+    doc.setFontSize(8);
+    const titleLines: string[] = doc.splitTextToSize(reportTitleText, maxTextWidth);
+
+    doc.setFont(fontName, 'normal');
+    doc.setFontSize(7.5);
+    const addressLines: string[] = addressText
+      ? doc.splitTextToSize(addressText, maxTextWidth)
+      : [];
+    const contactLines: string[] = contactLineText
+      ? doc.splitTextToSize(contactLineText, maxTextWidth)
+      : [];
+    const subtitleLines: string[] = subtitleText
+      ? doc.splitTextToSize(subtitleText, maxTextWidth)
+      : [];
+
+    const nameBlockH = nameLines.length * 4.8;
+    const titleBlockH = titleLines.length * 3.8;
+    const addressBlockH = addressLines.length > 0 ? addressLines.length * 3.5 + 0.8 : 0;
+    const contactBlockH = contactLines.length > 0 ? contactLines.length * 3.5 + 0.8 : 0;
+    const subtitleBlockH = subtitleLines.length > 0 ? subtitleLines.length * 3.5 + 1.0 : 0;
+
+    const totalTextH =
+      nameBlockH + 1.2 + titleBlockH + addressBlockH + contactBlockH + subtitleBlockH;
+    const bannerHeight = Math.max(
+      24,
+      Math.ceil(totalTextH + 9),
+      hasLogo ? Math.ceil(drawLogoH + 9) : 24
+    );
+
+    // Header Banner Background
+    doc.setFillColor(15, 23, 42); // slate-900
+    doc.rect(14, currentY, pageWidth - 28, bannerHeight, 'F');
+
+    // Render cached Logo if configured
+    if (hasLogo && companyHeader.logoDataUrl) {
+      try {
+        const format =
+          companyHeader.logoMimeType === 'image/jpeg' ||
+          companyHeader.logoDataUrl.startsWith('data:image/jpeg') ||
+          companyHeader.logoDataUrl.startsWith('data:image/jpg')
+            ? 'JPEG'
+            : 'PNG';
+        const logoY = currentY + Math.max(4.5, (bannerHeight - drawLogoH) / 2);
+        doc.addImage(companyHeader.logoDataUrl, format, 18, logoY, drawLogoW, drawLogoH);
+      } catch (logoErr) {
+        console.warn('Failed to render company logo in PDF:', logoErr);
+      }
+    }
+
+    let cursorY = currentY + 8;
+
+    // 1. Company Name
+    doc.setTextColor(245, 158, 11); // Amber-500
+    doc.setFont(fontName, 'bold');
+    doc.setFontSize(12.5);
+    doc.text(nameLines, textStartX, cursorY);
+    cursorY += nameBlockH + 0.8;
+
+    // 2. Report Title
+    doc.setTextColor(255, 255, 255);
+    doc.setFont(fontName, 'bold');
+    doc.setFontSize(8);
+    doc.text(titleLines, textStartX, cursorY);
+    cursorY += titleBlockH + 0.8;
+
+    // 3. Address (if present)
+    if (addressLines.length > 0) {
+      doc.setTextColor(203, 213, 225); // slate-300
+      doc.setFont(fontName, 'normal');
+      doc.setFontSize(7.5);
+      doc.text(addressLines, textStartX, cursorY);
+      cursorY += addressLines.length * 3.5 + 0.6;
+    }
+
+    // 4. Phone / Email / Website (if present)
+    if (contactLines.length > 0) {
+      doc.setTextColor(203, 213, 225); // slate-300
+      doc.setFont(fontName, 'normal');
+      doc.setFontSize(7.5);
+      doc.text(contactLines, textStartX, cursorY);
+      cursorY += contactLines.length * 3.5 + 0.6;
+    }
+
+    // 5. Subtitle
+    if (subtitleLines.length > 0) {
+      doc.setTextColor(148, 163, 184); // slate-400
+      doc.setFont(fontName, 'normal');
+      doc.setFontSize(7.5);
+      doc.text(subtitleLines, textStartX, cursorY);
+    }
+
+    // Status/Code badge on right
+    doc.setFillColor(245, 158, 11);
+    doc.roundedRect(pageWidth - 62, currentY + 5.5, 44, 13, 2, 2, 'F');
+    doc.setTextColor(15, 23, 42);
+    doc.setFont(fontName, 'bold');
+    doc.setFontSize(8.5);
+    doc.text(retirement.code, pageWidth - 40, currentY + 14, { align: 'center' });
+
+    currentY += bannerHeight + 5;
+  }
+
+  // --- GLOBAL REPORT METADATA BOX ---
   // Determine span period across all records
   const allDates = reportGroups.flatMap((g) => g.dailyRecords.map((r) => r.date)).sort();
   let periodText = 'Entire Retirement Duration';
@@ -166,22 +446,111 @@ export async function generateRetirementPDF(options: PDFExportOptions): Promise<
   } else if (allDates.length > 0) {
     periodText = `${formatDisplayDate(allDates[0])} to ${formatDisplayDate(allDates[allDates.length - 1])}`;
   }
-  doc.text(periodText, 55, currentY + 20.5);
 
-  // Right column of Metadata
-  doc.setFont(fontName, 'bold');
-  doc.setTextColor(100, 116, 139);
-  doc.text('SITE ENGINEER / OWNER:', pageWidth / 2 + 10, currentY + 6.5);
-  doc.text('DESIGNATION:', pageWidth / 2 + 10, currentY + 13.5);
-  doc.text('DATE GENERATED:', pageWidth / 2 + 10, currentY + 20.5);
+  const metadataValuesById: Record<ReportMetadataFieldId, string> = {
+    retirement: retirement.title || 'Untitled Retirement',
+    project_site: retirement.project || 'N/A',
+    period: periodText,
+    site_engineer_owner: retirement.ownerName || 'Site Engineer',
+    designation: retirement.ownerDesignation || 'Field Engineer',
+    date_generated: new Date().toLocaleDateString('en-GB'),
+  };
 
-  doc.setFont(fontName, 'normal');
-  doc.setTextColor(15, 23, 42);
-  doc.text(retirement.ownerName || 'Site Engineer', pageWidth / 2 + 54, currentY + 6.5);
-  doc.text(retirement.ownerDesignation || 'Field Engineer', pageWidth / 2 + 54, currentY + 13.5);
-  doc.text(new Date().toLocaleDateString('en-GB'), pageWidth / 2 + 54, currentY + 20.5);
+  const enabledFields = (reportMetadata.fields || []).filter((f) => f && f.enabled);
 
-  currentY += 31;
+  if (enabledFields.length > 0) {
+    const leftCount = Math.ceil(enabledFields.length / 2);
+    const leftFields = enabledFields.slice(0, leftCount);
+    const rightFields = enabledFields.slice(leftCount);
+
+    const leftLabelX = 18;
+    const leftValueX = 55;
+    const leftLabelMaxW = 35;
+    const leftValueMaxW = pageWidth / 2 + 6 - leftValueX;
+
+    const rightLabelX = pageWidth / 2 + 10;
+    const rightValueX = pageWidth / 2 + 54;
+    const rightLabelMaxW = 42;
+    const rightValueMaxW = pageWidth - 17 - rightValueX;
+
+    interface PreparedMetadataCell {
+      labelLines: string[];
+      valueLines: string[];
+      lineCount: number;
+    }
+
+    const prepareCell = (
+      field: { id: ReportMetadataFieldId; label: string } | undefined,
+      labelMaxW: number,
+      valueMaxW: number
+    ): PreparedMetadataCell | null => {
+      if (!field) return null;
+      const cleanLabel = (field.label || '').trim() || field.id.toUpperCase();
+      const labelWithColon = cleanLabel.endsWith(':') ? cleanLabel : `${cleanLabel}:`;
+      const rawValue = metadataValuesById[field.id] || '';
+
+      doc.setFontSize(8);
+      doc.setFont(fontName, 'bold');
+      const labelLines: string[] = doc.splitTextToSize(labelWithColon, labelMaxW);
+
+      doc.setFont(fontName, 'normal');
+      const valueLines: string[] = doc.splitTextToSize(rawValue, valueMaxW);
+
+      const lineCount = Math.max(labelLines.length, valueLines.length, 1);
+      return { labelLines, valueLines, lineCount };
+    };
+
+    const preparedRows: {
+      left: PreparedMetadataCell | null;
+      right: PreparedMetadataCell | null;
+      rowHeight: number;
+    }[] = [];
+
+    for (let i = 0; i < leftCount; i++) {
+      const leftCell = prepareCell(leftFields[i], leftLabelMaxW, leftValueMaxW);
+      const rightCell = prepareCell(rightFields[i], rightLabelMaxW, rightValueMaxW);
+      const maxLines = Math.max(leftCell?.lineCount || 1, rightCell?.lineCount || 0, 1);
+      const rowHeight = maxLines === 1 ? 7 : maxLines * 3.8 + 2.4;
+      preparedRows.push({ left: leftCell, right: rightCell, rowHeight });
+    }
+
+    const totalRowsH = preparedRows.reduce((sum, r) => sum + r.rowHeight, 0);
+    const metadataBoxHeight = Math.max(12, totalRowsH + 5);
+
+    doc.setFillColor(248, 250, 252); // slate-50
+    doc.setDrawColor(203, 213, 225); // slate-300
+    doc.roundedRect(14, currentY, pageWidth - 28, metadataBoxHeight, 2, 2, 'FD');
+
+    let rowY = currentY + 6.5;
+    for (const row of preparedRows) {
+      if (row.left) {
+        doc.setFontSize(8);
+        doc.setTextColor(100, 116, 139);
+        doc.setFont(fontName, 'bold');
+        doc.text(row.left.labelLines, leftLabelX, rowY);
+
+        doc.setFont(fontName, 'normal');
+        doc.setTextColor(15, 23, 42);
+        doc.text(row.left.valueLines, leftValueX, rowY);
+      }
+
+      if (row.right) {
+        doc.setFontSize(8);
+        doc.setTextColor(100, 116, 139);
+        doc.setFont(fontName, 'bold');
+        doc.text(row.right.labelLines, rightLabelX, rowY);
+
+        doc.setFont(fontName, 'normal');
+        doc.setTextColor(15, 23, 42);
+        doc.text(row.right.valueLines, rightValueX, rowY);
+      }
+
+      rowY += row.rowHeight;
+    }
+
+    currentY += metadataBoxHeight + 5;
+  }
+
 
   // --- DETAILED RECORDS ---
   // The report flows naturally from the metadata box directly into retirement records.

@@ -8,6 +8,8 @@ import {
   SyncQueueItem,
   SyncOperationType,
   SyncState,
+  CompanyHeaderConfig,
+  ReportMetadataConfig,
 } from '../types';
 import { generateUUID } from './codeGenerator';
 import { calculateAmount } from './currency';
@@ -466,14 +468,32 @@ class SyncService {
         this.queue = this.queue.filter((q) => q.id !== item.id);
         this.saveQueue();
       } catch (err: any) {
-        console.error(`[SyncService] Failed operation ${item.type} for entity ${item.entityId}:`, err);
+        const errCode = String(err?.code || '');
         const errMsg = err?.message || String(err);
-
-        // Check if database error is missing tables
-        if (
+        const isMissingTableErr =
+          errCode === '42P01' ||
+          errCode === 'PGRST204' ||
+          errCode === 'PGRST205' ||
           errMsg.toLowerCase().includes('schema cache') ||
-          errMsg.toLowerCase().includes('does not exist')
-        ) {
+          errMsg.toLowerCase().includes('does not exist');
+
+        // If the optional global_settings migration has not yet been applied in Supabase,
+        // keep the global settings item pending without breaking retirement synchronization.
+        if (item.type === 'UPSERT_GLOBAL_SETTINGS' && isMissingTableErr) {
+          console.info(
+            '[SyncService] global_settings table not yet deployed in Supabase; keeping global customisation cached locally and pending cloud deployment.'
+          );
+          item.status = 'pending';
+          item.lastError =
+            'Global settings migration (20261019000100_global_pdf_customisation.sql) not yet applied in Supabase.';
+          this.saveQueue();
+          continue;
+        }
+
+        console.error(`[SyncService] Failed operation ${item.type} for entity ${item.entityId}:`, err);
+
+        // Check if database error is missing core tables
+        if (isMissingTableErr) {
           this.tablesReady = false;
           this.updateState({
             tablesReady: false,
@@ -497,10 +517,11 @@ class SyncService {
     this.state.lastSyncedAt = now;
     this.setStorageItem(LAST_SYNC_KEY, now);
 
-    if (this.queue.length === 0) {
+    const nonGlobalPending = this.queue.filter((q) => q.type !== 'UPSERT_GLOBAL_SETTINGS');
+    if (this.queue.length === 0 || (nonGlobalPending.length === 0 && failedItems.length === 0)) {
       this.updateState({
         status: 'synced',
-        pendingCount: 0,
+        pendingCount: nonGlobalPending.length,
         lastSyncedAt: now,
         lastError: null,
       });
@@ -998,6 +1019,24 @@ class SyncService {
         break;
       }
 
+      case 'UPSERT_GLOBAL_SETTINGS': {
+        const { companyHeader, reportMetadata, updatedAt, updatedBy } = item.payload || {};
+        const headerToSave: CompanyHeaderConfig =
+          companyHeader || storage.getCompanyHeaderConfig();
+        const metadataToSave: ReportMetadataConfig =
+          reportMetadata || storage.getReportMetadataConfig();
+
+        const { error } = await supabase.from('global_settings').upsert({
+          id: 'global',
+          company_header: headerToSave,
+          report_metadata: metadataToSave,
+          updated_at: updatedAt || headerToSave.updatedAt || new Date().toISOString(),
+          updated_by: updatedBy || currentUserId,
+        });
+        if (error) throw error;
+        break;
+      }
+
       default:
         console.warn('[SyncService] Unknown sync operation:', item.type);
     }
@@ -1058,6 +1097,99 @@ class SyncService {
         }
       } catch {
         // Ignore if deleted_retirements table is not yet deployed
+      }
+
+      // 0b. Fetch global PDF customisation settings from public.global_settings (if deployed)
+      // Do not overwrite newer local Admin changes while an UPSERT_GLOBAL_SETTINGS operation is pending
+      const hasPendingGlobalSettings = this.queue.some(
+        (q) => q.type === 'UPSERT_GLOBAL_SETTINGS'
+      );
+      if (!hasPendingGlobalSettings) {
+        try {
+          const { data: globalRow, error: globalErr } = await supabase
+            .from('global_settings')
+            .select('company_header, report_metadata, updated_at, updated_by')
+            .eq('id', 'global')
+            .maybeSingle();
+
+          if (!globalErr && globalRow) {
+            const cloudUpdatedAt =
+              typeof globalRow.updated_at === 'string' ? globalRow.updated_at : '';
+            const cloudUpdatedTime = cloudUpdatedAt ? Date.parse(cloudUpdatedAt) : 0;
+
+            if (globalRow.company_header && typeof globalRow.company_header === 'object') {
+              const localHeader = storage.getCompanyHeaderConfig();
+              const localHeaderTime = localHeader.updatedAt ? Date.parse(localHeader.updatedAt) : 0;
+              const incomingHeaderTime =
+                typeof globalRow.company_header.updatedAt === 'string'
+                  ? Date.parse(globalRow.company_header.updatedAt)
+                  : cloudUpdatedTime;
+              const effectiveCloudHeaderTime = Math.max(
+                Number.isNaN(cloudUpdatedTime) ? 0 : cloudUpdatedTime,
+                Number.isNaN(incomingHeaderTime) ? 0 : incomingHeaderTime
+              );
+
+              if (
+                Number.isNaN(localHeaderTime) ||
+                effectiveCloudHeaderTime >= localHeaderTime ||
+                localHeader.updatedAt === '1970-01-01T00:00:00.000Z'
+              ) {
+                storage.saveCompanyHeaderConfig(
+                  {
+                    ...globalRow.company_header,
+                    updatedAt:
+                      globalRow.company_header.updatedAt ||
+                      cloudUpdatedAt ||
+                      new Date().toISOString(),
+                    updatedBy:
+                      globalRow.company_header.updatedBy ||
+                      globalRow.updated_by ||
+                      undefined,
+                  },
+                  true
+                );
+              }
+            }
+
+            if (globalRow.report_metadata && typeof globalRow.report_metadata === 'object') {
+              const localMetadata = storage.getReportMetadataConfig();
+              const localMetaTime = localMetadata.updatedAt
+                ? Date.parse(localMetadata.updatedAt)
+                : 0;
+              const incomingMetaTime =
+                typeof globalRow.report_metadata.updatedAt === 'string'
+                  ? Date.parse(globalRow.report_metadata.updatedAt)
+                  : cloudUpdatedTime;
+              const effectiveCloudMetaTime = Math.max(
+                Number.isNaN(cloudUpdatedTime) ? 0 : cloudUpdatedTime,
+                Number.isNaN(incomingMetaTime) ? 0 : incomingMetaTime
+              );
+
+              if (
+                Number.isNaN(localMetaTime) ||
+                effectiveCloudMetaTime >= localMetaTime ||
+                localMetadata.updatedAt === '1970-01-01T00:00:00.000Z'
+              ) {
+                storage.saveReportMetadataConfig(
+                  {
+                    ...globalRow.report_metadata,
+                    updatedAt:
+                      globalRow.report_metadata.updatedAt ||
+                      cloudUpdatedAt ||
+                      new Date().toISOString(),
+                    updatedBy:
+                      globalRow.report_metadata.updatedBy ||
+                      globalRow.updated_by ||
+                      undefined,
+                  },
+                  true
+                );
+              }
+            }
+          }
+        } catch {
+          // Gracefully ignore if global_settings migration has not yet been applied
+        }
       }
 
       // 1. Fetch accessible retirements: Owned OR in retirement_access

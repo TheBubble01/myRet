@@ -8,6 +8,10 @@ import {
   SyncOperationType,
   OfflineAuthMeta,
   OfflineAccessEvaluation,
+  CompanyHeaderConfig,
+  ReportMetadataFieldId,
+  ReportMetadataFieldConfig,
+  ReportMetadataConfig,
 } from '../types';
 import { DEMO_USER, createDemoRetirement, createConnectedDemoRetirement } from './demoData';
 import { generateUUID } from './codeGenerator';
@@ -75,6 +79,33 @@ const STORAGE_KEYS = {
   ACTIVITY_LOGS: 'myret_activity_logs',
   SUPABASE_CONFIG: 'myret_supabase_config',
   SYNC_QUEUE: 'myret_sync_queue',
+  COMPANY_HEADER_CONFIG: 'myret_company_header_config',
+  REPORT_METADATA_CONFIG: 'myret_report_metadata_config',
+};
+
+export const DEFAULT_COMPANY_HEADER_CONFIG: CompanyHeaderConfig = {
+  companyName: 'myRet',
+  address: '',
+  phone: '',
+  email: '',
+  website: '',
+  subtitle: 'Your Site Expenditure, Digitized. | Official Audit Record',
+  logoDataUrl: '',
+  updatedAt: '1970-01-01T00:00:00.000Z',
+};
+
+export const DEFAULT_REPORT_METADATA_FIELDS: ReportMetadataFieldConfig[] = [
+  { id: 'retirement', label: 'RETIREMENT', enabled: true },
+  { id: 'project_site', label: 'PROJECT / SITE', enabled: true },
+  { id: 'period', label: 'PERIOD', enabled: true },
+  { id: 'site_engineer_owner', label: 'SITE ENGINEER / OWNER', enabled: true },
+  { id: 'designation', label: 'DESIGNATION', enabled: true },
+  { id: 'date_generated', label: 'DATE GENERATED', enabled: true },
+];
+
+export const DEFAULT_REPORT_METADATA_CONFIG: ReportMetadataConfig = {
+  fields: DEFAULT_REPORT_METADATA_FIELDS.map((f) => ({ ...f })),
+  updatedAt: '1970-01-01T00:00:00.000Z',
 };
 
 // 48 hours in milliseconds
@@ -440,6 +471,223 @@ class StorageService {
 
   setSupabaseConfig(config: SupabaseConfig): void {
     this.setItem(STORAGE_KEYS.SUPABASE_CONFIG, config);
+  }
+
+  // --- Global PDF Header & Report Metadata Customisation ---
+  getCompanyHeaderConfig(): CompanyHeaderConfig {
+    const raw = this.getItem<Partial<CompanyHeaderConfig> | null>(
+      STORAGE_KEYS.COMPANY_HEADER_CONFIG,
+      null
+    );
+    if (!raw || typeof raw !== 'object') {
+      return { ...DEFAULT_COMPANY_HEADER_CONFIG };
+    }
+
+    const companyName =
+      typeof raw.companyName === 'string' && raw.companyName.trim().length > 0
+        ? raw.companyName.trim()
+        : DEFAULT_COMPANY_HEADER_CONFIG.companyName;
+
+    return {
+      companyName,
+      address: typeof raw.address === 'string' ? raw.address.trim() : '',
+      phone: typeof raw.phone === 'string' ? raw.phone.trim() : '',
+      email: typeof raw.email === 'string' ? raw.email.trim() : '',
+      website: typeof raw.website === 'string' ? raw.website.trim() : '',
+      subtitle:
+        typeof raw.subtitle === 'string'
+          ? raw.subtitle.trim()
+          : DEFAULT_COMPANY_HEADER_CONFIG.subtitle,
+      logoDataUrl: typeof raw.logoDataUrl === 'string' ? raw.logoDataUrl : '',
+      logoMimeType:
+        raw.logoMimeType === 'image/png' || raw.logoMimeType === 'image/jpeg'
+          ? raw.logoMimeType
+          : undefined,
+      logoWidth:
+        typeof raw.logoWidth === 'number' && raw.logoWidth > 0 ? raw.logoWidth : undefined,
+      logoHeight:
+        typeof raw.logoHeight === 'number' && raw.logoHeight > 0 ? raw.logoHeight : undefined,
+      updatedAt:
+        typeof raw.updatedAt === 'string' && raw.updatedAt
+          ? raw.updatedAt
+          : DEFAULT_COMPANY_HEADER_CONFIG.updatedAt,
+      updatedBy: typeof raw.updatedBy === 'string' ? raw.updatedBy : undefined,
+    };
+  }
+
+  getReportMetadataConfig(): ReportMetadataConfig {
+    const raw = this.getItem<Partial<ReportMetadataConfig> | null>(
+      STORAGE_KEYS.REPORT_METADATA_CONFIG,
+      null
+    );
+    const rawFields = Array.isArray(raw?.fields) ? raw!.fields : [];
+    const byId = new Map<ReportMetadataFieldId, Partial<ReportMetadataFieldConfig>>();
+    for (const f of rawFields) {
+      if (f && typeof f === 'object' && typeof f.id === 'string') {
+        byId.set(f.id as ReportMetadataFieldId, f);
+      }
+    }
+
+    const normalizedFields: ReportMetadataFieldConfig[] = DEFAULT_REPORT_METADATA_FIELDS.map(
+      (def) => {
+        const stored = byId.get(def.id);
+        const rawLabel = typeof stored?.label === 'string' ? stored.label.trim() : '';
+        return {
+          id: def.id,
+          label: rawLabel.length > 0 ? rawLabel : def.label,
+          enabled: typeof stored?.enabled === 'boolean' ? stored.enabled : def.enabled,
+        };
+      }
+    );
+
+    return {
+      fields: normalizedFields,
+      updatedAt:
+        typeof raw?.updatedAt === 'string' && raw.updatedAt
+          ? raw.updatedAt
+          : DEFAULT_REPORT_METADATA_CONFIG.updatedAt,
+      updatedBy: typeof raw?.updatedBy === 'string' ? raw.updatedBy : undefined,
+    };
+  }
+
+  saveCompanyHeaderConfig(
+    config: CompanyHeaderConfig,
+    skipSync: boolean = false
+  ): CompanyHeaderConfig {
+    const currentUser = this.getCurrentUser();
+    const nowIso = new Date().toISOString();
+    const normalized: CompanyHeaderConfig = {
+      companyName:
+        typeof config.companyName === 'string' && config.companyName.trim().length > 0
+          ? config.companyName.trim()
+          : DEFAULT_COMPANY_HEADER_CONFIG.companyName,
+      address: typeof config.address === 'string' ? config.address.trim() : '',
+      phone: typeof config.phone === 'string' ? config.phone.trim() : '',
+      email: typeof config.email === 'string' ? config.email.trim() : '',
+      website: typeof config.website === 'string' ? config.website.trim() : '',
+      subtitle:
+        typeof config.subtitle === 'string'
+          ? config.subtitle.trim()
+          : DEFAULT_COMPANY_HEADER_CONFIG.subtitle,
+      logoDataUrl: typeof config.logoDataUrl === 'string' ? config.logoDataUrl : '',
+      logoMimeType:
+        config.logoMimeType === 'image/png' || config.logoMimeType === 'image/jpeg'
+          ? config.logoMimeType
+          : undefined,
+      logoWidth:
+        typeof config.logoWidth === 'number' && config.logoWidth > 0
+          ? config.logoWidth
+          : undefined,
+      logoHeight:
+        typeof config.logoHeight === 'number' && config.logoHeight > 0
+          ? config.logoHeight
+          : undefined,
+      updatedAt: skipSync && config.updatedAt ? config.updatedAt : nowIso,
+      updatedBy: skipSync ? config.updatedBy : currentUser?.id || config.updatedBy,
+    };
+
+    this.setItem(STORAGE_KEYS.COMPANY_HEADER_CONFIG, normalized);
+
+    if (!skipSync && globalSyncTrigger) {
+      const metadataConfig = this.getReportMetadataConfig();
+      globalSyncTrigger('UPSERT_GLOBAL_SETTINGS', 'global', {
+        companyHeader: normalized,
+        reportMetadata: metadataConfig,
+        updatedAt: normalized.updatedAt,
+        updatedBy: normalized.updatedBy,
+      });
+    }
+
+    return normalized;
+  }
+
+  saveReportMetadataConfig(
+    config: ReportMetadataConfig,
+    skipSync: boolean = false
+  ): ReportMetadataConfig {
+    const currentUser = this.getCurrentUser();
+    const nowIso = new Date().toISOString();
+    const rawFields = Array.isArray(config?.fields) ? config.fields : [];
+    const byId = new Map<ReportMetadataFieldId, Partial<ReportMetadataFieldConfig>>();
+    for (const f of rawFields) {
+      if (f && typeof f === 'object' && typeof f.id === 'string') {
+        byId.set(f.id as ReportMetadataFieldId, f);
+      }
+    }
+
+    const normalizedFields: ReportMetadataFieldConfig[] = DEFAULT_REPORT_METADATA_FIELDS.map(
+      (def) => {
+        const incoming = byId.get(def.id);
+        const rawLabel = typeof incoming?.label === 'string' ? incoming.label.trim() : '';
+        return {
+          id: def.id,
+          label: rawLabel.length > 0 ? rawLabel : def.label,
+          enabled: typeof incoming?.enabled === 'boolean' ? incoming.enabled : def.enabled,
+        };
+      }
+    );
+
+    const normalized: ReportMetadataConfig = {
+      fields: normalizedFields,
+      updatedAt: skipSync && config.updatedAt ? config.updatedAt : nowIso,
+      updatedBy: skipSync ? config.updatedBy : currentUser?.id || config.updatedBy,
+    };
+
+    this.setItem(STORAGE_KEYS.REPORT_METADATA_CONFIG, normalized);
+
+    if (!skipSync && globalSyncTrigger) {
+      const headerConfig = this.getCompanyHeaderConfig();
+      globalSyncTrigger('UPSERT_GLOBAL_SETTINGS', 'global', {
+        companyHeader: headerConfig,
+        reportMetadata: normalized,
+        updatedAt: normalized.updatedAt,
+        updatedBy: normalized.updatedBy,
+      });
+    }
+
+    return normalized;
+  }
+
+  saveGlobalCustomisation(
+    headerConfig: CompanyHeaderConfig,
+    metadataConfig: ReportMetadataConfig,
+    skipSync: boolean = false
+  ): { companyHeader: CompanyHeaderConfig; reportMetadata: ReportMetadataConfig } {
+    const currentUser = this.getCurrentUser();
+    const nowIso = new Date().toISOString();
+
+    const savedHeader = this.saveCompanyHeaderConfig(
+      {
+        ...headerConfig,
+        updatedAt: skipSync && headerConfig.updatedAt ? headerConfig.updatedAt : nowIso,
+        updatedBy: skipSync ? headerConfig.updatedBy : currentUser?.id || headerConfig.updatedBy,
+      },
+      true
+    );
+
+    const savedMetadata = this.saveReportMetadataConfig(
+      {
+        ...metadataConfig,
+        updatedAt: skipSync && metadataConfig.updatedAt ? metadataConfig.updatedAt : nowIso,
+        updatedBy:
+          skipSync ? metadataConfig.updatedBy : currentUser?.id || metadataConfig.updatedBy,
+      },
+      true
+    );
+
+    if (!skipSync && globalSyncTrigger) {
+      globalSyncTrigger('UPSERT_GLOBAL_SETTINGS', 'global', {
+        companyHeader: savedHeader,
+        reportMetadata: savedMetadata,
+        updatedAt: nowIso,
+        updatedBy: currentUser?.id,
+      });
+    }
+
+    return {
+      companyHeader: savedHeader,
+      reportMetadata: savedMetadata,
+    };
   }
 
   // --- Retirements ---

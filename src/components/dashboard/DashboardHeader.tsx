@@ -16,6 +16,7 @@ import {
   Wifi,
   WifiOff,
   ChevronRight,
+  Sliders,
 } from 'lucide-react';
 import { UserProfile } from '../../types';
 import { isUserAdmin } from '../../utils/supabaseClient';
@@ -37,6 +38,7 @@ interface DashboardHeaderProps {
   onLogout: () => void;
   onGoHome: () => void;
   onOpenAdmin?: () => void;
+  onOpenCustomisation?: () => void;
 }
 
 export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
@@ -53,6 +55,7 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
   onLogout,
   onGoHome,
   onOpenAdmin,
+  onOpenCustomisation,
 }) => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const menuContainerRef = useRef<HTMLDivElement>(null);
@@ -366,6 +369,27 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
                   <ChevronRight className="w-3.5 h-3.5 text-slate-500" />
                 </button>
               </div>
+
+              {/* SECTION: SETTINGS (ADMIN ONLY) */}
+              {isAdmin && onOpenCustomisation && (
+                <div className="p-2 space-y-1">
+                  <p className="px-2.5 pt-1 pb-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Settings
+                  </p>
+
+                  <button
+                    type="button"
+                    onClick={() => handleMenuAction(onOpenCustomisation)}
+                    className="w-full flex items-center justify-between gap-2.5 px-2.5 py-2.5 rounded-xl text-xs font-semibold text-amber-400 hover:bg-amber-500/15 active:bg-amber-500/20 transition text-left"
+                  >
+                    <span className="flex items-center gap-2.5">
+                      <Sliders className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                      <span>Customisation</span>
+                    </span>
+                    <ChevronRight className="w-3.5 h-3.5 text-amber-400/70" />
+                  </button>
+                </div>
+              )}
 
               {/* SECTION 3: ACCOUNT */}
               <div className="p-2 space-y-1">

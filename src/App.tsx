@@ -30,6 +30,7 @@ import { ProfileModal } from './components/auth/ProfileModal';
 import { GuideModal } from './components/modals/GuideModal';
 import { FAQModal } from './components/modals/FAQModal';
 import { AboutModal } from './components/modals/AboutModal';
+import { CustomisationModal } from './components/modals/CustomisationModal';
 import { AdminUserManagement } from './components/admin/AdminUserManagement';
 import { useSystemTheme } from './hooks/useSystemTheme';
 
@@ -192,6 +193,7 @@ export default function App() {
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [showFAQModal, setShowFAQModal] = useState(false);
   const [showAboutModal, setShowAboutModal] = useState(false);
+  const [showCustomisationModal, setShowCustomisationModal] = useState(false);
 
   // Quick export modal from dashboard card
   const [exportTargetRetirement, setExportTargetRetirement] = useState<Retirement | null>(null);
@@ -723,6 +725,7 @@ export default function App() {
           setView('dashboard');
         }}
         onOpenAdmin={() => setView('admin_users')}
+        onOpenCustomisation={() => setShowCustomisationModal(true)}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -1071,6 +1074,11 @@ export default function App() {
         isOpen={showAboutModal}
         onClose={() => setShowAboutModal(false)}
         currentUser={currentUser}
+      />
+      <CustomisationModal
+        isOpen={showCustomisationModal}
+        currentUser={currentUser}
+        onClose={() => setShowCustomisationModal(false)}
       />
     </div>
   );

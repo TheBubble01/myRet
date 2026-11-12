@@ -109,7 +109,43 @@ export type SyncOperationType =
   | 'CONNECT_RETIREMENTS'
   | 'DISCONNECT_RETIREMENTS'
   | 'CLAIM_RETIREMENT'
-  | 'UPDATE_PROFILE';
+  | 'UPDATE_PROFILE'
+  | 'UPSERT_GLOBAL_SETTINGS';
+
+export interface CompanyHeaderConfig {
+  companyName: string;
+  address: string;
+  phone: string;
+  email: string;
+  website: string;
+  subtitle?: string;
+  logoDataUrl?: string;
+  logoMimeType?: 'image/png' | 'image/jpeg';
+  logoWidth?: number;
+  logoHeight?: number;
+  updatedAt: string;
+  updatedBy?: string;
+}
+
+export type ReportMetadataFieldId =
+  | 'retirement'
+  | 'project_site'
+  | 'period'
+  | 'site_engineer_owner'
+  | 'designation'
+  | 'date_generated';
+
+export interface ReportMetadataFieldConfig {
+  id: ReportMetadataFieldId;
+  label: string;
+  enabled: boolean;
+}
+
+export interface ReportMetadataConfig {
+  fields: ReportMetadataFieldConfig[];
+  updatedAt: string;
+  updatedBy?: string;
+}
 
 export interface SyncQueueItem {
   id: string; // Operation UUID
@@ -157,4 +193,5 @@ export type OfflineAccessEvaluation =
   | {
       status: 'none';
     };
+
 
