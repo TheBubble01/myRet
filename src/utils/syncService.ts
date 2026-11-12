@@ -429,6 +429,7 @@ class SyncService {
       return;
     }
 
+    storage.restorePersistedSupabaseSessionIfNeeded();
     const {
       data: { session },
     } = await supabase.auth.getSession();
@@ -1010,6 +1011,7 @@ class SyncService {
     if (!isSupabaseConfigured) return false;
     if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
 
+    storage.restorePersistedSupabaseSessionIfNeeded();
     const {
       data: { session },
     } = await supabase.auth.getSession();

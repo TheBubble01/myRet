@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Plus,
   KeyRound,
@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { Session } from '@supabase/supabase-js';
 import { Retirement, UserProfile, ActiveUtility } from './types';
-import { supabase, formatSupabaseUser, isUserAdmin } from './utils/supabaseClient';
+import { supabase, formatSupabaseUser, isUserAdmin, isSupabaseConfigured } from './utils/supabaseClient';
 import { storage } from './utils/storage';
 import { syncService } from './utils/syncService';
 import { DashboardHeader } from './components/dashboard/DashboardHeader';
@@ -35,21 +35,152 @@ import { useSystemTheme } from './hooks/useSystemTheme';
 
 type AppView = 'landing' | 'dashboard' | 'retirement_home' | 'trash' | 'admin_users';
 
+/**
+ * Distinguishes temporary connectivity/server errors from confirmed Supabase authentication failures.
+ */
+function classifySupabaseAuthError(
+  error: any
+): 'connectivity_or_server_error' | 'confirmed_auth_failure' {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return 'connectivity_or_server_error';
+  }
+  if (!error) {
+    return 'connectivity_or_server_error';
+  }
+
+  const name = String(error.name || '');
+  const code = String(error.code || '').toLowerCase();
+  const message = String(error.message || '').toLowerCase();
+  const status = typeof error.status === 'number' ? error.status : 0;
+
+  if (
+    name === 'AuthRetryableFetchError' ||
+    name === 'AbortError' ||
+    name === 'TimeoutError' ||
+    status === 0 ||
+    status === 408 ||
+    status === 429 ||
+    status >= 500
+  ) {
+    return 'connectivity_or_server_error';
+  }
+
+  if (
+    message.includes('failed to fetch') ||
+    message.includes('network') ||
+    message.includes('load failed') ||
+    message.includes('timeout') ||
+    message.includes('timed out') ||
+    message.includes('fetch error') ||
+    message.includes('econn') ||
+    message.includes('enotfound') ||
+    message.includes('bad gateway') ||
+    message.includes('service unavailable') ||
+    message.includes('gateway timeout')
+  ) {
+    return 'connectivity_or_server_error';
+  }
+
+  const isConfirmedAuthStatus = status === 400 || status === 401 || status === 403;
+  const isConfirmedAuthCodeOrMessage =
+    code === 'invalid_grant' ||
+    code === 'refresh_token_not_found' ||
+    code === 'invalid_jwt' ||
+    code === 'bad_jwt' ||
+    code === 'user_not_found' ||
+    code === 'user_banned' ||
+    code === 'session_not_found' ||
+    code === 'session_expired' ||
+    message.includes('invalid refresh token') ||
+    message.includes('refresh token not found') ||
+    message.includes('invalid grant') ||
+    message.includes('user not found') ||
+    message.includes('user is banned') ||
+    message.includes('session not found') ||
+    message.includes('invalid claim');
+
+  if (isConfirmedAuthStatus && isConfirmedAuthCodeOrMessage) {
+    return 'confirmed_auth_failure';
+  }
+
+  return 'connectivity_or_server_error';
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const timeoutErr = new Error('Operation timed out');
+      timeoutErr.name = 'TimeoutError';
+      reject(timeoutErr);
+    }, timeoutMs);
+
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
 export default function App() {
   // Automatically follows device/system theme (light / dark)
   useSystemTheme();
 
-  const [session, setSession] = useState<Session | null>(null);
-  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
-  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  // Synchronously evaluate local offline authentication state on startup (local-first)
+  const initialOfflineEval = useMemo(() => storage.evaluateOfflineAccess(), []);
+  const hasUrlAuthCallback = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    const hash = window.location.hash || '';
+    const search = window.location.search || '';
+    return (
+      hash.includes('access_token=') ||
+      hash.includes('refresh_token=') ||
+      search.includes('code=')
+    );
+  }, []);
 
-  const [view, setView] = useState<AppView>('landing');
+  const [session, setSession] = useState<Session | null>(null);
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() =>
+    initialOfflineEval.status === 'valid' ? initialOfflineEval.user : null
+  );
+  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(() => {
+    if (initialOfflineEval.status === 'valid' || initialOfflineEval.status === 'expired') {
+      return false;
+    }
+    if (hasUrlAuthCallback) {
+      return true;
+    }
+    if (
+      typeof navigator !== 'undefined' &&
+      navigator.onLine &&
+      storage.hasPersistedSupabaseSession()
+    ) {
+      return true;
+    }
+    return false;
+  });
+
+  const [view, setView] = useState<AppView>(() =>
+    initialOfflineEval.status === 'valid' ? 'dashboard' : 'landing'
+  );
   const [activeUtility, setActiveUtility] = useState<ActiveUtility>('retirement');
-  const [retirements, setRetirements] = useState<Retirement[]>([]);
+  const [retirements, setRetirements] = useState<Retirement[]>(() =>
+    initialOfflineEval.status === 'valid' ? storage.getRetirements() : []
+  );
   const [activeRetirement, setActiveRetirement] = useState<Retirement | null>(null);
 
+  const [expiredUserEmail, setExpiredUserEmail] = useState<string>(() =>
+    initialOfflineEval.status === 'expired' ? initialOfflineEval.user.email : ''
+  );
+
   // Modals
-  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState<boolean>(
+    () => initialOfflineEval.status === 'expired'
+  );
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -67,6 +198,10 @@ export default function App() {
 
   // Dashboard search
   const [dashboardSearch, setDashboardSearch] = useState('');
+
+  // Internal refs to coordinate manual logout and background validation
+  const isManualLogoutRef = useRef(false);
+  const isValidatingOnlineRef = useRef(false);
 
   const refreshRetirements = useCallback(() => {
     setRetirements(storage.getRetirements());
@@ -89,69 +224,239 @@ export default function App() {
     return unsubscribe;
   }, [refreshRetirements]);
 
-  // Initialize and subscribe to Supabase Auth state changes
+  /**
+   * Performs a non-blocking online authentication validation against the live Supabase server
+   * (`supabase.auth.getUser()` / `refreshSession()`).
+   * Updates the 7-day validation timestamp ONLY when a genuine online response from Supabase succeeds.
+   */
+  const validateSessionInBackground = useCallback(
+    async (mountedCheck: () => boolean = () => true) => {
+      if (isValidatingOnlineRef.current) return;
+      if (isManualLogoutRef.current) return;
+      if (!isSupabaseConfigured) {
+        if (mountedCheck()) setIsAuthLoading(false);
+        return;
+      }
+
+      const offlineEval = storage.evaluateOfflineAccess();
+
+      // If the user's 7-day offline access period has expired, require explicit online sign-in
+      if (offlineEval.status === 'expired') {
+        if (mountedCheck()) {
+          setSession(null);
+          setCurrentUser(null);
+          setExpiredUserEmail(offlineEval.user.email);
+          setView('landing');
+          setIsAuthLoading(false);
+        }
+        return;
+      }
+
+      // If offline, do not attempt network validation or alter lastValidatedAt
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        if (mountedCheck()) {
+          setIsAuthLoading(false);
+        }
+        return;
+      }
+
+      // Restore backed-up Supabase session token if an earlier offline refresh failure cleared it
+      if (offlineEval.status === 'valid') {
+        storage.restorePersistedSupabaseSessionIfNeeded(offlineEval.user.id);
+      }
+
+      if (!storage.hasPersistedSupabaseSession() && !hasUrlAuthCallback && offlineEval.status === 'none') {
+        if (mountedCheck()) {
+          setIsAuthLoading(false);
+        }
+        return;
+      }
+
+      isValidatingOnlineRef.current = true;
+      try {
+        // 1. Verify token directly against the live Supabase Auth server (GET /auth/v1/user)
+        let {
+          data: { user: verifiedUser },
+          error: userError,
+        } = await withTimeout(supabase.auth.getUser(), 5000);
+
+        // 2. If getUser failed or returned no user, attempt a live token refresh using stored refreshToken
+        if ((!verifiedUser || userError) && !isManualLogoutRef.current) {
+          const authMeta = storage.getAuthMeta();
+          if (authMeta?.refreshToken) {
+            const refreshRes = await withTimeout(
+              supabase.auth.refreshSession({ refresh_token: authMeta.refreshToken }),
+              5000
+            );
+            if (refreshRes.data?.user && refreshRes.data?.session && !refreshRes.error) {
+              verifiedUser = refreshRes.data.user;
+              userError = null;
+            } else if (refreshRes.error) {
+              userError = refreshRes.error;
+            }
+          }
+        }
+
+        if (!mountedCheck() || isManualLogoutRef.current) return;
+
+        if (verifiedUser && !userError) {
+          // Genuinely validated online with Supabase Auth server
+          const {
+            data: { session: latestSession },
+          } = await supabase.auth.getSession();
+          const profile = formatSupabaseUser(verifiedUser);
+
+          storage.recordOnlineAuthValidation(profile, {
+            accessToken: latestSession?.access_token,
+            refreshToken: latestSession?.refresh_token,
+          });
+
+          if (!mountedCheck()) return;
+          setSession(latestSession);
+          setCurrentUser(profile);
+          setView((prev) => (prev === 'landing' ? 'dashboard' : prev));
+          setIsAuthLoading(false);
+
+          // Resume cloud synchronization in background
+          syncService.pullFromCloud().then(() => {
+            if (mountedCheck()) refreshRetirements();
+            syncService.processQueue();
+          });
+          return;
+        }
+
+        // Handle error: distinguish temporary connectivity/server issues from confirmed auth failure
+        const errorCategory = classifySupabaseAuthError(userError);
+
+        if (errorCategory === 'confirmed_auth_failure') {
+          storage.clearAuthSession();
+          setSession(null);
+          setCurrentUser(null);
+          setActiveRetirement(null);
+          setView('landing');
+        } else {
+          // Temporary connectivity / timeout / server error:
+          // Preserve local auth state and keep user on dashboard if within 7-day grace period
+          const latestEval = storage.evaluateOfflineAccess();
+          if (latestEval.status === 'valid') {
+            storage.restorePersistedSupabaseSessionIfNeeded(latestEval.user.id);
+            setCurrentUser(latestEval.user);
+            setView((prev) => (prev === 'landing' ? 'dashboard' : prev));
+          } else if (latestEval.status === 'expired') {
+            setSession(null);
+            setCurrentUser(null);
+            setExpiredUserEmail(latestEval.user.email);
+            setView('landing');
+          }
+        }
+      } catch (err) {
+        // Network timeout or unexpected fetch failure — never log out a user within their 7-day grace window
+        const latestEval = storage.evaluateOfflineAccess();
+        if (mountedCheck() && latestEval.status === 'valid') {
+          storage.restorePersistedSupabaseSessionIfNeeded(latestEval.user.id);
+          setCurrentUser(latestEval.user);
+        }
+      } finally {
+        isValidatingOnlineRef.current = false;
+        if (mountedCheck()) {
+          setIsAuthLoading(false);
+        }
+      }
+    },
+    [hasUrlAuthCallback, refreshRetirements]
+  );
+
+  // Initialize background auth check, auth state listener, and network reconnection listener
   useEffect(() => {
     let mounted = true;
+    const isMounted = () => mounted;
 
-    // 1. Check existing session on mount
-    supabase.auth.getSession().then(({ data: { session: existingSession }, error }) => {
-      if (!mounted) return;
-      if (error) {
-        console.error('Error fetching Supabase session:', error);
-      }
-      if (existingSession?.user) {
-        setSession(existingSession);
-        const profile = formatSupabaseUser(existingSession.user);
-        setCurrentUser(profile);
-        storage.setCurrentUser(profile);
-        setView('dashboard');
+    // 1. Run non-blocking background validation on startup
+    validateSessionInBackground(isMounted);
 
-        // Pull cloud data and process pending queue in background
-        syncService.pullFromCloud().then(() => {
-          if (mounted) refreshRetirements();
-          syncService.processQueue();
-        });
-      } else {
-        setSession(null);
-        setCurrentUser(null);
-        storage.clearCurrentUser();
-        setView('landing');
-      }
-      setIsAuthLoading(false);
-    });
-
-    // 2. Listen for auth state changes (sign in, sign out, token refresh)
+    // 2. Listen for Supabase auth state events
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, newSession) => {
       if (!mounted) return;
+      if (isManualLogoutRef.current) return;
+
+      const offlineEval = storage.evaluateOfflineAccess();
+
+      // Do not allow cached INITIAL_SESSION to bypass an expired 7-day offline window
+      if (offlineEval.status === 'expired' && event === 'INITIAL_SESSION') {
+        setSession(null);
+        setCurrentUser(null);
+        setExpiredUserEmail(offlineEval.user.email);
+        setView('landing');
+        setIsAuthLoading(false);
+        return;
+      }
+
       if (newSession?.user) {
         setSession(newSession);
         const profile = formatSupabaseUser(newSession.user);
         setCurrentUser(profile);
-        storage.setCurrentUser(profile);
-        setView((prev) => (prev === 'landing' ? 'dashboard' : prev));
 
-        // Pull cloud data on sign-in
-        syncService.pullFromCloud().then(() => {
-          if (mounted) refreshRetirements();
-          syncService.processQueue();
-        });
+        // Only update the 7-day validation timestamp on genuine online token refresh / sign-in events,
+        // never merely from reading INITIAL_SESSION out of localStorage cache.
+        if (
+          (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN' || event === 'USER_UPDATED') &&
+          typeof navigator !== 'undefined' &&
+          navigator.onLine
+        ) {
+          storage.recordOnlineAuthValidation(profile, {
+            accessToken: newSession.access_token,
+            refreshToken: newSession.refresh_token,
+          });
+
+          syncService.pullFromCloud().then(() => {
+            if (mounted) refreshRetirements();
+            syncService.processQueue();
+          });
+        } else {
+          storage.setCurrentUser(profile);
+        }
+
+        setView((prev) => (prev === 'landing' ? 'dashboard' : prev));
       } else {
         setSession(null);
-        setCurrentUser(null);
-        storage.clearCurrentUser();
-        setActiveRetirement(null);
-        setView('landing');
+
+        // If a background token refresh failed due to offline/network issues,
+        // preserve offline access if still within the 7-day grace period!
+        if (offlineEval.status === 'valid') {
+          storage.restorePersistedSupabaseSessionIfNeeded(offlineEval.user.id);
+          setCurrentUser(offlineEval.user);
+        } else {
+          if (offlineEval.status === 'expired') {
+            setExpiredUserEmail(offlineEval.user.email);
+          }
+          setCurrentUser(null);
+          setActiveRetirement(null);
+          setView('landing');
+        }
       }
       setIsAuthLoading(false);
     });
 
+    // 3. When internet connectivity returns, resume online authentication validation & sync
+    const handleOnline = () => {
+      if (!mounted || isManualLogoutRef.current) return;
+      validateSessionInBackground(isMounted);
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleOnline);
+    }
+
     return () => {
       mounted = false;
       subscription.unsubscribe();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleOnline);
+      }
     };
-  }, [refreshRetirements]);
+  }, [refreshRetirements, validateSessionInBackground]);
 
   // Update retirements whenever current user or view changes
   useEffect(() => {
@@ -162,15 +467,42 @@ export default function App() {
     }
   }, [currentUser, view, refreshRetirements]);
 
-  // Protected route enforcement: if no session, ensure view is landing
+  // Protected route & 7-day grace period enforcement
   useEffect(() => {
-    if (!isAuthLoading && !session && view !== 'landing') {
+    if (isAuthLoading) return;
+
+    if (!currentUser) {
+      if (view !== 'landing') {
+        setView('landing');
+      }
+      return;
+    }
+
+    const offlineEval = storage.evaluateOfflineAccess();
+    if (!session && offlineEval.status !== 'valid') {
+      if (offlineEval.status === 'expired') {
+        setExpiredUserEmail(offlineEval.user.email);
+        setAuthMode('login');
+        setShowAuthModal(true);
+      }
+      setCurrentUser(null);
+      setActiveRetirement(null);
       setView('landing');
     }
-  }, [isAuthLoading, session, view]);
+  }, [isAuthLoading, session, currentUser, view]);
+
+  const isAuthenticated = Boolean(
+    currentUser && (session || storage.isOfflineAccessValid(currentUser.id))
+  );
 
   const handleOpenRetirement = (retirement: Retirement) => {
-    if (!session || !currentUser) {
+    if (!currentUser || (!session && !storage.isOfflineAccessValid(currentUser.id))) {
+      const offlineEval = storage.evaluateOfflineAccess();
+      if (offlineEval.status === 'expired') {
+        setExpiredUserEmail(offlineEval.user.email);
+        setCurrentUser(null);
+        setView('landing');
+      }
       setAuthMode('login');
       setShowAuthModal(true);
       return;
@@ -248,16 +580,25 @@ export default function App() {
   };
 
   const handleLogout = async () => {
-    try {
-      await supabase.auth.signOut();
-    } catch (err) {
-      console.error('Supabase signOut error:', err);
-    }
-    storage.clearCurrentUser();
+    isManualLogoutRef.current = true;
+    // Immediately clear local authentication state so cached dashboard cannot be restored
+    storage.clearAuthSession();
     setSession(null);
     setCurrentUser(null);
     setActiveRetirement(null);
+    setRetirements([]);
+    setExpiredUserEmail('');
     setView('landing');
+
+    try {
+      await withTimeout(supabase.auth.signOut(), 3000);
+    } catch (err) {
+      console.error('Supabase signOut error:', err);
+    } finally {
+      // Ensure any residual token written by signOut fallback is removed
+      storage.clearAuthSession();
+      isManualLogoutRef.current = false;
+    }
   };
 
   const trashCount = currentUser ? storage.getTrashRetirements().length : 0;
@@ -296,12 +637,12 @@ export default function App() {
   }
 
   // Not authenticated: always render Landing Page with Auth modal triggers
-  if (!session || !currentUser || view === 'landing') {
+  if (!isAuthenticated || !currentUser || view === 'landing') {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-slate-950">
         <LandingPage
           onStartRetirement={() => {
-            if (session && currentUser) {
+            if (isAuthenticated && currentUser) {
               setView('dashboard');
             } else {
               setAuthMode('register');
@@ -309,7 +650,7 @@ export default function App() {
             }
           }}
           onLogin={() => {
-            if (session && currentUser) {
+            if (isAuthenticated && currentUser) {
               setView('dashboard');
             } else {
               setAuthMode('login');
@@ -320,7 +661,7 @@ export default function App() {
           onOpenFAQ={() => setShowFAQModal(true)}
           onOpenAbout={() => setShowAboutModal(true)}
           onLoadDemo={() => {
-            if (session && currentUser) {
+            if (isAuthenticated && currentUser) {
               handleLoadDemo();
             } else {
               setAuthMode('login');
@@ -333,11 +674,20 @@ export default function App() {
         <AuthModal
           isOpen={showAuthModal}
           initialMode={authMode}
+          initialEmail={expiredUserEmail}
           onClose={() => setShowAuthModal(false)}
           onSuccess={(user) => {
+            isManualLogoutRef.current = false;
+            setExpiredUserEmail('');
             setCurrentUser(user);
             refreshRetirements();
             setView('dashboard');
+
+            // Pull cloud data and process pending queue in background after login
+            syncService.pullFromCloud().then(() => {
+              refreshRetirements();
+              syncService.processQueue();
+            });
           }}
         />
 

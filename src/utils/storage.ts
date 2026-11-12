@@ -6,6 +6,8 @@ import {
   UserProfile,
   RetirementTotals,
   SyncOperationType,
+  OfflineAuthMeta,
+  OfflineAccessEvaluation,
 } from '../types';
 import { DEMO_USER, createDemoRetirement, createConnectedDemoRetirement } from './demoData';
 import { generateUUID } from './codeGenerator';
@@ -65,6 +67,7 @@ function areTimestampsEqual(a?: string, b?: string): boolean {
 
 const STORAGE_KEYS = {
   CURRENT_USER: 'myret_current_user',
+  AUTH_META: 'myret_auth_meta',
   ALL_USERS: 'myret_users_list',
   RETIREMENTS: 'myret_retirements',
   DAILY_RECORDS: 'myret_daily_records',
@@ -76,6 +79,9 @@ const STORAGE_KEYS = {
 
 // 48 hours in milliseconds
 export const TRASH_RETENTION_MS = 48 * 60 * 60 * 1000;
+
+// 7 days in milliseconds (604,800,000 ms) for offline authentication grace period
+export const OFFLINE_AUTH_GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface SupabaseConfig {
   url: string;
@@ -110,7 +116,7 @@ class StorageService {
     // No automatic mock user assignment
   }
 
-  // --- Auth / User Management ---
+  // --- Auth / User Management & 7-Day Offline Access ---
   getCurrentUser(): UserProfile | null {
     return this.getItem<UserProfile | null>(STORAGE_KEYS.CURRENT_USER, null);
   }
@@ -133,6 +139,262 @@ class StorageService {
 
   clearCurrentUser(): void {
     localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+  }
+
+  getAuthMeta(): OfflineAuthMeta | null {
+    return this.getItem<OfflineAuthMeta | null>(STORAGE_KEYS.AUTH_META, null);
+  }
+
+  /**
+   * Locates Supabase's persisted session entry (`sb-<project-ref>-auth-token`) in localStorage.
+   */
+  private findSupabaseSessionInStorage(): { key: string; raw: string; parsed: any } | null {
+    if (typeof localStorage === 'undefined') return null;
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && /^sb-.*-auth-token$/.test(key)) {
+          const raw = localStorage.getItem(key);
+          if (!raw) continue;
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object') {
+            return { key, raw, parsed };
+          }
+        }
+      }
+    } catch {
+      // Ignore storage read/parse errors
+    }
+    return null;
+  }
+
+  hasPersistedSupabaseSession(): boolean {
+    const found = this.findSupabaseSessionInStorage();
+    return Boolean(found?.parsed?.access_token || found?.parsed?.refresh_token);
+  }
+
+  /**
+   * Extracts a verifiable online validation timestamp (in ms) from an existing Supabase
+   * session token for safe migration of existing authenticated users without blindly
+   * granting a fresh 7-day period from Date.now().
+   */
+  private extractTokenValidationTimestamp(parsedSession: any, targetUserId: string): number | null {
+    if (!parsedSession || typeof parsedSession !== 'object') return null;
+    const sessionUserId = parsedSession.user?.id;
+    if (!sessionUserId || sessionUserId !== targetUserId) return null;
+    if (!parsedSession.access_token && !parsedSession.refresh_token) return null;
+
+    const now = Date.now();
+    const candidates: number[] = [];
+
+    // 1. Decode JWT `iat` (Issued At) claim from access_token if available
+    if (typeof parsedSession.access_token === 'string') {
+      try {
+        const parts = parsedSession.access_token.split('.');
+        if (parts.length === 3) {
+          const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+          const jsonPayload = atob(base64);
+          const payload = JSON.parse(jsonPayload);
+          if (typeof payload?.iat === 'number' && payload.iat > 0) {
+            candidates.push(payload.iat * 1000);
+          }
+        }
+      } catch {
+        // Ignore malformed JWT decode
+      }
+    }
+
+    // 2. Compute token issuance from `expires_at` and `expires_in`
+    if (typeof parsedSession.expires_at === 'number' && parsedSession.expires_at > 0) {
+      const expiresInSec =
+        typeof parsedSession.expires_in === 'number' && parsedSession.expires_in > 0
+          ? parsedSession.expires_in
+          : 3600;
+      const issuedAtMs = (parsedSession.expires_at - expiresInSec) * 1000;
+      if (issuedAtMs > 0) {
+        candidates.push(issuedAtMs);
+      }
+    }
+
+    // 3. Check `user.last_sign_in_at`
+    if (typeof parsedSession.user?.last_sign_in_at === 'string') {
+      const lastSignInMs = Date.parse(parsedSession.user.last_sign_in_at);
+      if (!Number.isNaN(lastSignInMs) && lastSignInMs > 0) {
+        candidates.push(lastSignInMs);
+      }
+    }
+
+    // Filter to valid past timestamps (allowing up to 60s clock skew, clamped to now)
+    const validCandidates = candidates
+      .filter((ts) => Number.isFinite(ts) && ts > 0 && ts <= now + 60_000)
+      .map((ts) => Math.min(ts, now));
+
+    if (validCandidates.length === 0) return null;
+    return Math.max(...validCandidates);
+  }
+
+  /**
+   * Records a genuinely successful online authentication validation with Supabase.
+   * MUST ONLY be called when online sign-in, token refresh, or live server validation succeeds.
+   */
+  recordOnlineAuthValidation(
+    user: UserProfile,
+    sessionTokens?: { accessToken?: string; refreshToken?: string }
+  ): OfflineAuthMeta {
+    this.setCurrentUser(user);
+    const sbSession = this.findSupabaseSessionInStorage();
+    const existingMeta = this.getAuthMeta();
+
+    const meta: OfflineAuthMeta = {
+      userId: user.id,
+      email: user.email,
+      lastValidatedAt: Date.now(),
+      accessToken:
+        sessionTokens?.accessToken ||
+        sbSession?.parsed?.access_token ||
+        (existingMeta?.userId === user.id ? existingMeta.accessToken : undefined),
+      refreshToken:
+        sessionTokens?.refreshToken ||
+        sbSession?.parsed?.refresh_token ||
+        (existingMeta?.userId === user.id ? existingMeta.refreshToken : undefined),
+      persistedSessionKey:
+        sbSession?.key ||
+        (existingMeta?.userId === user.id ? existingMeta.persistedSessionKey : undefined),
+      persistedSessionRaw:
+        sbSession?.raw ||
+        (existingMeta?.userId === user.id ? existingMeta.persistedSessionRaw : undefined),
+    };
+
+    this.setItem(STORAGE_KEYS.AUTH_META, meta);
+    return meta;
+  }
+
+  /**
+   * If a temporary network drop caused @supabase/supabase-js to remove its `sb-*-auth-token`
+   * entry during a failed background refresh, restores the backed-up session entry so
+   * online validation and synchronization can resume when connectivity returns.
+   */
+  restorePersistedSupabaseSessionIfNeeded(userId?: string): boolean {
+    if (typeof localStorage === 'undefined') return false;
+    const existingSb = this.findSupabaseSessionInStorage();
+    if (existingSb?.parsed?.refresh_token) {
+      return true;
+    }
+
+    const meta = this.getAuthMeta();
+    if (!meta) return false;
+    if (userId && meta.userId !== userId) return false;
+
+    if (meta.persistedSessionKey && meta.persistedSessionRaw) {
+      try {
+        localStorage.setItem(meta.persistedSessionKey, meta.persistedSessionRaw);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Evaluates whether a previously authenticated user is eligible for offline dashboard access
+   * within the 7-day grace period. Never resets or extends `lastValidatedAt`.
+   */
+  evaluateOfflineAccess(): OfflineAccessEvaluation {
+    const currentUser = this.getCurrentUser();
+    if (!currentUser || !currentUser.id) {
+      return { status: 'none' };
+    }
+
+    let meta = this.getAuthMeta();
+    const sbSession = this.findSupabaseSessionInStorage();
+
+    // Safe migration for existing authenticated users who do not yet have `myret_auth_meta`
+    if (!meta || meta.userId !== currentUser.id || typeof meta.lastValidatedAt !== 'number') {
+      if (sbSession) {
+        const derivedTimestamp = this.extractTokenValidationTimestamp(
+          sbSession.parsed,
+          currentUser.id
+        );
+        if (derivedTimestamp !== null) {
+          meta = {
+            userId: currentUser.id,
+            email: currentUser.email,
+            lastValidatedAt: derivedTimestamp,
+            accessToken: sbSession.parsed?.access_token,
+            refreshToken: sbSession.parsed?.refresh_token,
+            persistedSessionKey: sbSession.key,
+            persistedSessionRaw: sbSession.raw,
+          };
+          this.setItem(STORAGE_KEYS.AUTH_META, meta);
+        }
+      }
+
+      if (!meta || meta.userId !== currentUser.id || typeof meta.lastValidatedAt !== 'number') {
+        return { status: 'none' };
+      }
+    } else if (sbSession && sbSession.parsed?.user?.id === currentUser.id) {
+      // Keep the raw token backup current without altering `lastValidatedAt`
+      if (
+        sbSession.raw !== meta.persistedSessionRaw ||
+        sbSession.parsed?.refresh_token !== meta.refreshToken
+      ) {
+        meta = {
+          ...meta,
+          accessToken: sbSession.parsed?.access_token || meta.accessToken,
+          refreshToken: sbSession.parsed?.refresh_token || meta.refreshToken,
+          persistedSessionKey: sbSession.key,
+          persistedSessionRaw: sbSession.raw,
+        };
+        this.setItem(STORAGE_KEYS.AUTH_META, meta);
+      }
+    }
+
+    const elapsedMs = Date.now() - meta.lastValidatedAt;
+    if (elapsedMs <= OFFLINE_AUTH_GRACE_PERIOD_MS) {
+      return {
+        status: 'valid',
+        user: currentUser,
+        lastValidatedAt: meta.lastValidatedAt,
+        remainingMs: OFFLINE_AUTH_GRACE_PERIOD_MS - Math.max(0, elapsedMs),
+      };
+    }
+
+    return {
+      status: 'expired',
+      user: currentUser,
+      lastValidatedAt: meta.lastValidatedAt,
+      expiredAgoMs: elapsedMs - OFFLINE_AUTH_GRACE_PERIOD_MS,
+    };
+  }
+
+  isOfflineAccessValid(userId?: string): boolean {
+    const evaluation = this.evaluateOfflineAccess();
+    if (evaluation.status !== 'valid') return false;
+    if (userId && evaluation.user.id !== userId) return false;
+    return true;
+  }
+
+  /**
+   * Terminates local authenticated state on manual logout or confirmed auth failure.
+   * Preserves all locally stored retirement records, daily entries, supplementary entries, and sync queue.
+   */
+  clearAuthSession(): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+      localStorage.removeItem(STORAGE_KEYS.AUTH_META);
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && /^sb-.*-auth-token$/.test(key)) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach((k) => localStorage.removeItem(k));
+    } catch (e) {
+      console.error('Error clearing local auth session:', e);
+    }
   }
 
   getAllUsers(): UserProfile[] {

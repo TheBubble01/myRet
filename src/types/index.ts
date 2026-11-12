@@ -130,3 +130,31 @@ export interface SyncState {
   lastError: string | null;
   tablesReady: boolean;
 }
+
+export interface OfflineAuthMeta {
+  userId: string;
+  email: string;
+  lastValidatedAt: number; // Unix timestamp (ms) of last confirmed online Supabase validation
+  accessToken?: string;
+  refreshToken?: string;
+  persistedSessionKey?: string;
+  persistedSessionRaw?: string;
+}
+
+export type OfflineAccessEvaluation =
+  | {
+      status: 'valid';
+      user: UserProfile;
+      lastValidatedAt: number;
+      remainingMs: number;
+    }
+  | {
+      status: 'expired';
+      user: UserProfile;
+      lastValidatedAt: number;
+      expiredAgoMs: number;
+    }
+  | {
+      status: 'none';
+    };
+

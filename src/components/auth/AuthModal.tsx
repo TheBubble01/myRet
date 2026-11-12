@@ -7,6 +7,7 @@ import { storage } from '../../utils/storage';
 interface AuthModalProps {
   isOpen: boolean;
   initialMode?: 'login' | 'register';
+  initialEmail?: string;
   onClose: () => void;
   onSuccess: (user: UserProfile) => void;
 }
@@ -14,11 +15,12 @@ interface AuthModalProps {
 export const AuthModal: React.FC<AuthModalProps> = ({
   isOpen,
   initialMode = 'login',
+  initialEmail = '',
   onClose,
   onSuccess,
 }) => {
   const [mode, setMode] = useState<'login' | 'register' | 'forgot'>(initialMode);
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState(initialEmail);
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [designation, setDesignation] = useState('Site Construction Engineer');
@@ -30,6 +32,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  React.useEffect(() => {
+    if (isOpen) {
+      setMode(initialMode);
+      if (initialEmail && !email) {
+        setEmail(initialEmail);
+      }
+    }
+  }, [isOpen, initialMode, initialEmail]);
+
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -37,6 +48,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setError(null);
     setRegistrationNotice(null);
     setResendSent(false);
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setError('An internet connection is required to sign in. Please connect to the internet and try again.');
+      return;
+    }
 
     if (!isSupabaseConfigured) {
       setError('Unable to connect to authentication service. Please check your connection and try again.');
@@ -62,10 +78,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
         if (authError) {
           console.error('Supabase signInWithPassword error:', authError);
-          if (authError.message.toLowerCase().includes('invalid login credentials')) {
+          const lowerMsg = (authError.message || '').toLowerCase();
+          if (lowerMsg.includes('invalid login credentials')) {
             setError('Invalid email or password. Access rejected.');
-          } else if (authError.message.toLowerCase().includes('email not confirmed')) {
+          } else if (lowerMsg.includes('email not confirmed')) {
             setError('Your email has not been confirmed yet. Please check your inbox or confirm your email address.');
+          } else if (
+            lowerMsg.includes('failed to fetch') ||
+            lowerMsg.includes('network') ||
+            lowerMsg.includes('load failed') ||
+            authError.name === 'AuthRetryableFetchError'
+          ) {
+            setError('Unable to reach the authentication server. Please check your internet connection and try again.');
           } else {
             setError(authError.message || 'Authentication failed. Please verify your credentials.');
           }
@@ -79,9 +103,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           return;
         }
 
-        // Success: format real Supabase user
+        // Success: format real Supabase user and record genuine online validation timestamp
         const profile = formatSupabaseUser(data.user);
-        storage.setCurrentUser(profile);
+        storage.recordOnlineAuthValidation(profile, {
+          accessToken: data.session.access_token,
+          refreshToken: data.session.refresh_token,
+        });
         setIsSubmitting(false);
         onSuccess(profile);
         onClose();
@@ -129,7 +156,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         // If email confirmation is disabled or session returned immediately
         if (data.session) {
           const profile = formatSupabaseUser(data.user);
-          storage.setCurrentUser(profile);
+          storage.recordOnlineAuthValidation(profile, {
+            accessToken: data.session.access_token,
+            refreshToken: data.session.refresh_token,
+          });
           setIsSubmitting(false);
           onSuccess(profile);
           onClose();
